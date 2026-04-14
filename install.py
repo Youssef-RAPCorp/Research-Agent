@@ -353,13 +353,14 @@ Language: {lang}
 Rules:
 - Return ONLY {only}
 - No markdown fences, no explanation text
-- Include comprehensive docstrings
-- Add clear TODO markers for API key / external service integration points
+- Keep docstrings brief (one line per function)
+- Add TODO markers only for API key / external service integration points
 - Async-first in Python where appropriate
+- Be concise — prioritize complete, working code over verbose comments
 """
 
         complexity = module.get("complexity", 5)
-        max_tokens = min(4096 + (complexity - 1) * 512, 16000)
+        max_tokens = min(8000 + (complexity - 1) * 500, 16000)
 
         payload = json.dumps({
             "model": self.MODEL,
@@ -755,26 +756,33 @@ class Installer:
 
     # ── Install a single module ───────────────────────────────────────────
 
+    @staticmethod
+    def _check_syntax(code: str, path_hint: str) -> tuple[bool, str]:
+        """Returns (is_valid, error_message)."""
+        try:
+            compile(code, path_hint, "exec")
+            return True, ""
+        except SyntaxError as e:
+            return False, f"line {e.lineno}: {e.msg} — {repr(e.text or '')}"
+
     def _install_module(self, mod: dict) -> bool:
         mod_id = mod["id"]
         out = Path(mod["path"])
         if out.exists():
             try:
                 content = out.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                content = out.read_text(encoding="cp1252", errors="replace")
             except Exception:
                 content = ""
             is_stub = "raise NotImplementedError" in content
-            try:
-                compile(content, str(out), "exec")
-                valid_syntax = True
-            except SyntaxError:
-                valid_syntax = False
+            valid_syntax, err_msg = self._check_syntax(content, str(out))
             if not is_stub and valid_syntax:
                 self.skipped += 1
                 self.log.muted(f"  {mod['name']} — already installed, skipping")
                 return True
             elif not valid_syntax:
-                self.log.warn(f"  {mod['name']} — syntax error in existing file, regenerating")
+                self.log.warn(f"  {mod['name']} — syntax error in existing file ({err_msg}), regenerating")
 
         for attempt in range(self.MAX_RETRIES + 1):
             try:
@@ -784,13 +792,17 @@ class Installer:
                     time.sleep(self.RETRY_DELAY * attempt)
 
                 code, tokens = self.claude.generate(mod, retry=attempt)
-                try:
-                    compile(code, mod["path"], "exec")
-                except SyntaxError as se:
-                    raise RuntimeError(f"Generated code has syntax error: {se}") from se
+                valid, err_msg = self._check_syntax(code, mod["path"])
+                if not valid:
+                    raise RuntimeError(f"Generated code has syntax error: {err_msg}")
                 out = Path(mod["path"])
                 out.parent.mkdir(parents=True, exist_ok=True)
                 out.write_text(code, encoding="utf-8")
+                # Verify the written file reads back and compiles cleanly
+                written = out.read_text(encoding="utf-8")
+                valid_written, err_written = self._check_syntax(written, str(out))
+                if not valid_written:
+                    raise RuntimeError(f"Written file failed verification: {err_written}")
                 self.log.ok(f"  {mod['name']} — {tokens} tokens → {mod['path']}")
                 return True
 
@@ -799,7 +811,6 @@ class Installer:
                 self.log.error(f"  [MODULE:{mod_id}] {err_str}")
                 if attempt == self.MAX_RETRIES:
                     self.log.error(f"  Max retries exceeded — {mod_id} flagged for manual review")
-                    # Write a stub so the project stays importable
                     stub = f'"""\n{mod["name"]} — STUB (install failed)\nTODO: implement manually\nError: {err_str}\n"""\n\nraise NotImplementedError("Module not yet installed: {mod_id}")\n'
                     out = Path(mod["path"])
                     out.parent.mkdir(parents=True, exist_ok=True)
