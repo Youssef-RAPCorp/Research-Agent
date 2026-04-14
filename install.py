@@ -352,9 +352,12 @@ Rules:
 - Async-first in Python where appropriate
 """
 
+        complexity = module.get("complexity", 5)
+        max_tokens = min(4096 + (complexity - 1) * 512, 16000)
+
         payload = json.dumps({
             "model": self.MODEL,
-            "max_tokens": 1500,
+            "max_tokens": max_tokens,
             "system": (
                 f"You are an expert {lang} developer specializing in AI multi-agent systems "
                 "and physics research software. Return ONLY valid code, no markdown, no explanation."
@@ -745,10 +748,18 @@ class Installer:
                 content = out.read_text(encoding="utf-8")
             except Exception:
                 content = ""
-            if "raise NotImplementedError" not in content:
+            is_stub = "raise NotImplementedError" in content
+            try:
+                compile(content, str(out), "exec")
+                valid_syntax = True
+            except SyntaxError:
+                valid_syntax = False
+            if not is_stub and valid_syntax:
                 self.skipped += 1
                 self.log.muted(f"  {mod['name']} — already installed, skipping")
                 return True
+            elif not valid_syntax:
+                self.log.warn(f"  {mod['name']} — syntax error in existing file, regenerating")
 
         for attempt in range(self.MAX_RETRIES + 1):
             try:
