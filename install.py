@@ -658,7 +658,7 @@ class Installer:
         # Try .env file
         env_file = Path(".env")
         if env_file.exists():
-            for line in env_file.read_text().splitlines():
+            for line in env_file.read_text(encoding="utf-8").splitlines():
                 if line.startswith("ANTHROPIC_API_KEY="):
                     key = line.split("=", 1)[1].strip().strip('"').strip("'")
                     if key.startswith("sk-"):
@@ -681,7 +681,7 @@ class Installer:
         # Optionally save to .env
         save = input("  Save to .env for future runs? [Y/n] > ").strip().lower()
         if save in ("", "y", "yes"):
-            with open(".env", "a") as f:
+            with open(".env", "a", encoding="utf-8") as f:
                 f.write(f"\nANTHROPIC_API_KEY={key}\n")
             self.log.ok("Saved to .env")
 
@@ -695,12 +695,12 @@ class Installer:
             Path(d).mkdir(exist_ok=True)
             init = Path(d) / "__init__.py"
             if not init.exists() and d not in ("logs", "deploy"):
-                init.write_text(INIT_TEMPLATE.format(pkg=d.capitalize()))
-        Path(".env.example").write_text(ENV_EXAMPLE)
-        Path("requirements.txt").write_text(REQUIREMENTS)
-        Path("main.py").write_text(MAIN_PY)
-        Path("tests/__init__.py").write_text("")
-        Path("tests/test_system.py").write_text(TEST_TEMPLATE)
+                init.write_text(INIT_TEMPLATE.format(pkg=d.capitalize()), encoding="utf-8")
+        Path(".env.example").write_text(ENV_EXAMPLE, encoding="utf-8")
+        Path("requirements.txt").write_text(REQUIREMENTS, encoding="utf-8")
+        Path("main.py").write_text(MAIN_PY, encoding="utf-8")
+        Path("tests/__init__.py").write_text("", encoding="utf-8")
+        Path("tests/test_system.py").write_text(TEST_TEMPLATE, encoding="utf-8")
         self.log.ok(f"{len(DIRS)} directories + scaffolding files created")
 
     # ── Install a single module ───────────────────────────────────────────
@@ -730,7 +730,7 @@ class Installer:
                     stub = f'"""\n{mod["name"]} — STUB (install failed)\nTODO: implement manually\nError: {err_str}\n"""\n\nraise NotImplementedError("Module not yet installed: {mod_id}")\n'
                     out = Path(mod["path"])
                     out.parent.mkdir(parents=True, exist_ok=True)
-                    out.write_text(stub)
+                    out.write_text(stub, encoding="utf-8")
                     return False
         return False
 
