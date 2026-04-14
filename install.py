@@ -488,8 +488,27 @@ def main():
 
     print(f"\\nMode: {args.mode} | Pattern: {args.pattern}")
     print(f"Query: {query}\\n")
-    print("[ Orchestrator not yet connected — run the installer to generate all modules ]")
-    print("[ Once installed: from agents.orchestrator import PhysicsOrchestrator ]")
+
+    try:
+        from agents.orchestrator import PhysicsOrchestrator
+    except ImportError as e:
+        print("[ Orchestrator not yet connected — run the installer to generate all modules ]")
+        print(f"[ Import error: {e} ]")
+        return
+
+    orchestrator = PhysicsOrchestrator()
+    try:
+        result = asyncio.run(orchestrator.run(
+            query=query,
+            mode=args.mode,
+            pattern=args.pattern,
+        ))
+    except TypeError:
+        # Fallback if orchestrator uses positional args or sync interface
+        result = orchestrator.run(query=query, mode=args.mode, pattern=args.pattern)
+
+    if result:
+        print(result)
 
 if __name__ == "__main__":
     main()
