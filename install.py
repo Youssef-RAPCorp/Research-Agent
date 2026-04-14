@@ -385,7 +385,15 @@ Rules:
         timeout = 60 + complexity * 15  # scales from 75s (c=1) to 225s (c=11)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            return data["content"][0]["text"], data.get("usage", {}).get("output_tokens", 0)
+            code = data["content"][0]["text"]
+            # Strip markdown fences Claude sometimes returns despite instructions
+            lines = code.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            code = "\n".join(lines).strip()
+            return code, data.get("usage", {}).get("output_tokens", 0)
 
 # ─────────────────────────────────────────────
 # PROJECT SCAFFOLD
