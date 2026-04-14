@@ -385,15 +385,15 @@ Rules:
         timeout = 60 + complexity * 15  # scales from 75s (c=1) to 225s (c=11)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            code = data["content"][0]["text"]
+            code = data["content"][0]["text"].strip()
             # Strip markdown fences Claude sometimes returns despite instructions
-            lines = code.splitlines()
-            if lines and lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            code = "\n".join(lines).strip()
-            return code, data.get("usage", {}).get("output_tokens", 0)
+            if code.startswith("```"):
+                # Remove opening fence line (e.g. ```python)
+                code = code[code.index("\n") + 1:] if "\n" in code else ""
+            # Remove closing fence and anything after it
+            if "\n```" in code:
+                code = code[:code.rfind("\n```")]
+            return code.strip(), data.get("usage", {}).get("output_tokens", 0)
 
 # ─────────────────────────────────────────────
 # PROJECT SCAFFOLD
@@ -784,6 +784,10 @@ class Installer:
                     time.sleep(self.RETRY_DELAY * attempt)
 
                 code, tokens = self.claude.generate(mod, retry=attempt)
+                try:
+                    compile(code, mod["path"], "exec")
+                except SyntaxError as se:
+                    raise RuntimeError(f"Generated code has syntax error: {se}") from se
                 out = Path(mod["path"])
                 out.parent.mkdir(parents=True, exist_ok=True)
                 out.write_text(code, encoding="utf-8")
