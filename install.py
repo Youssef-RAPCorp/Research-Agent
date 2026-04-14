@@ -163,9 +163,15 @@ class InstallerLogger:
         try:
             text = self.LOG_FILE.read_text(encoding="utf-8")
             lines = text.splitlines()
+            # Only look at the most recent run (after the last PHASE marker for Step 5)
+            last_run_start = 0
+            for i, l in enumerate(lines):
+                if "Step 5" in l:
+                    last_run_start = i
+            recent = lines[last_run_start:]
             failed = [l.split("[MODULE:")[-1].split("]")[0].strip()
-                      for l in lines if "[ERROR]" in l and "[MODULE:" in l]
-            memory_issues = any("memory" in l.lower() or "oom" in l.lower() for l in lines)
+                      for l in recent if "[ERROR]" in l and "[MODULE:" in l]
+            memory_issues = any("memory" in l.lower() or "oom" in l.lower() for l in recent)
             self.info(f"  → {len(failed)} previously failed modules detected")
             if memory_issues:
                 self.warn("  → memory issues in previous run — reducing concurrency")
@@ -376,7 +382,8 @@ Rules:
             method="POST",
         )
 
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        timeout = 60 + complexity * 15  # scales from 75s (c=1) to 225s (c=11)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             return data["content"][0]["text"], data.get("usage", {}).get("output_tokens", 0)
 
