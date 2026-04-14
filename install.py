@@ -598,6 +598,7 @@ class Installer:
         self.log  = InstallerLogger()
         self.claude: Optional[ClaudeClient] = None
         self.installed  = 0
+        self.skipped    = 0
         self.failed_ids = []
         self.start_time = time.time()
 
@@ -696,17 +697,33 @@ class Installer:
             init = Path(d) / "__init__.py"
             if not init.exists() and d not in ("logs", "deploy"):
                 init.write_text(INIT_TEMPLATE.format(pkg=d.capitalize()), encoding="utf-8")
-        Path(".env.example").write_text(ENV_EXAMPLE, encoding="utf-8")
-        Path("requirements.txt").write_text(REQUIREMENTS, encoding="utf-8")
-        Path("main.py").write_text(MAIN_PY, encoding="utf-8")
-        Path("tests/__init__.py").write_text("", encoding="utf-8")
-        Path("tests/test_system.py").write_text(TEST_TEMPLATE, encoding="utf-8")
+        for fpath, content in [
+            (".env.example",       ENV_EXAMPLE),
+            ("requirements.txt",   REQUIREMENTS),
+            ("main.py",            MAIN_PY),
+            ("tests/__init__.py",  ""),
+            ("tests/test_system.py", TEST_TEMPLATE),
+        ]:
+            p = Path(fpath)
+            if not p.exists():
+                p.write_text(content, encoding="utf-8")
         self.log.ok(f"{len(DIRS)} directories + scaffolding files created")
 
     # ── Install a single module ───────────────────────────────────────────
 
     def _install_module(self, mod: dict) -> bool:
         mod_id = mod["id"]
+        out = Path(mod["path"])
+        if out.exists():
+            try:
+                content = out.read_text(encoding="utf-8")
+            except Exception:
+                content = ""
+            if "raise NotImplementedError" not in content:
+                self.skipped += 1
+                self.log.muted(f"  {mod['name']} — already installed, skipping")
+                return True
+
         for attempt in range(self.MAX_RETRIES + 1):
             try:
                 if attempt > 0:
@@ -762,7 +779,7 @@ class Installer:
                 else:
                     self.failed_ids.append(mod["id"])
 
-                done = self.installed + len(self.failed_ids)
+                done = self.installed + self.skipped + len(self.failed_ids)
                 bar_filled = int((done / TOTAL) * 30)
                 bar = "█" * bar_filled + "░" * (30 - bar_filled)
                 pct = int((done / TOTAL) * 100)
@@ -815,6 +832,8 @@ class Installer:
         print(f"{C.BOLD}{C.PURPLE}║  Installation complete                           ║{C.RESET}")
         print(f"{C.BOLD}{C.PURPLE}╚══════════════════════════════════════════════════╝{C.RESET}\n")
         print(f"  {C.GREEN}✓ Installed  : {self.installed}/{TOTAL} modules{C.RESET}")
+        if self.skipped:
+            print(f"  {C.DIM}↷ Skipped    : {self.skipped} (already installed){C.RESET}")
         if self.failed_ids:
             print(f"  {C.RED}✗ Failed     : {len(self.failed_ids)} (stubs written — see logs/install.log){C.RESET}")
             for fid in self.failed_ids:

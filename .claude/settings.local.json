@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cat \"/c/Users/Youssef/Documents/AppData/Local/Research-Agent/logs/\"*.log)"
+    ]
+  }
+}
