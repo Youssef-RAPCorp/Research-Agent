@@ -714,8 +714,15 @@ class Installer:
         for d in DIRS:
             Path(d).mkdir(exist_ok=True)
             init = Path(d) / "__init__.py"
-            if not init.exists() and d not in ("logs", "deploy"):
-                init.write_text(INIT_TEMPLATE.format(pkg=d.capitalize()), encoding="utf-8")
+            if d not in ("logs", "deploy"):
+                needs_write = not init.exists()
+                if not needs_write:
+                    try:
+                        init.read_text(encoding="utf-8")
+                    except (UnicodeDecodeError, ValueError):
+                        needs_write = True  # file exists but is corrupt/wrong encoding
+                if needs_write:
+                    init.write_text(INIT_TEMPLATE.format(pkg=d.capitalize()), encoding="utf-8")
         for fpath, content in [
             (".env.example",       ENV_EXAMPLE),
             ("requirements.txt",   REQUIREMENTS),
