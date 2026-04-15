@@ -409,9 +409,11 @@ Rules:
     # Known compatibility fixes applied to every generated Python file
     _PATCHES = [
         # pydantic v2: BaseSettings moved to pydantic-settings
+        # Handle "from pydantic import BaseSettings, Field, ..." patterns
         ("from pydantic import BaseSettings",
          "from pydantic_settings import BaseSettings"),
-        ("from pydantic import BaseSettings, ",
+        # If BaseSettings was bundled with other pydantic names, split the import
+        ("from pydantic_settings import BaseSettings, ",
          "from pydantic_settings import BaseSettings\nfrom pydantic import "),
         # pydantic v2: validator → field_validator
         ("from pydantic import validator",
