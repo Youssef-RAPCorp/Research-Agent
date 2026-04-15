@@ -456,11 +456,68 @@ Rules:
          ".model_dump_json()"),
     ]
 
+    @staticmethod
+    def _fix_bad_imports(code: str) -> str:
+        """
+        Parse every 'from X import a, b, c' in code.
+        For each name that doesn't exist in the installed module, find the
+        closest real name via difflib and replace it (or remove it if no
+        close match exists).  Only runs against importable stdlib/site packages.
+        """
+        import ast, importlib, difflib
+
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return code
+
+        lines = code.splitlines(keepends=True)
+        # Collect (lineno, module, bad_name, fix) — lineno is 1-based
+        fixes: list = []
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or not node.module:
+                continue
+            # Skip project-internal modules (agents.*, config.*, etc.)
+            if node.module.split(".")[0] in {
+                "agents", "config", "knowledge", "memory",
+                "thinking", "physics", "discovery", "interface",
+            }:
+                continue
+            try:
+                mod = importlib.import_module(node.module)
+            except Exception:
+                continue  # not installed yet — skip
+
+            available = [n for n in dir(mod) if not n.startswith("__")]
+            for alias in node.names:
+                name = alias.name
+                if name == "*" or hasattr(mod, name):
+                    continue
+                matches = difflib.get_close_matches(name, available, n=1, cutoff=0.55)
+                fixes.append((node.lineno, name, matches[0] if matches else None))
+
+        if not fixes:
+            return code
+
+        for lineno, bad, good in fixes:
+            idx = lineno - 1
+            if idx >= len(lines):
+                continue
+            if good:
+                lines[idx] = lines[idx].replace(bad, good)
+            else:
+                # No close match — comment out the bad name to prevent ImportError
+                lines[idx] = "# [auto-removed unresolvable import] " + lines[idx]
+
+        return "".join(lines)
+
     @classmethod
     def _patch_code(cls, code: str, path_hint: str = "") -> str:
         """Apply known compatibility fixes to generated code."""
         for old, new in cls._PATCHES:
             code = code.replace(old, new)
+        code = cls._fix_bad_imports(code)
 
         # Ensure known required exports exist in their respective modules
         REQUIRED_EXPORTS = {
