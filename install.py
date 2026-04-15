@@ -471,6 +471,9 @@ Rules:
             "agents/orchestrator.py": [
                 ("PhysicsOrchestrator", "class PhysicsOrchestrator:\n    async def run(self, query: str, mode: str = 'standard', pattern: str = 'down_adaptive'):\n        raise NotImplementedError('PhysicsOrchestrator.run not yet implemented')"),
             ],
+            "agents/registry.py": [
+                ("register_agent", "_agent_registry = {}\n\ndef register_agent(name: str):\n    def decorator(cls):\n        _agent_registry[name] = cls\n        return cls\n    return decorator\n\ndef get_agent(name: str):\n    return _agent_registry.get(name)\n\ndef get_all_agents():\n    return dict(_agent_registry)"),
+            ],
             "config/errors.py": [
                 ("handle_error", "def handle_error(e: Exception) -> None:\n    import logging\n    logging.getLogger(__name__).error(str(e), exc_info=True)"),
             ],
@@ -479,7 +482,9 @@ Rules:
         for file_path, exports in REQUIRED_EXPORTS.items():
             if ph.endswith(file_path):
                 for fn_name, fn_body in exports:
-                    if f"def {fn_name}" not in code:
+                    # Match both "def name" and "class name" so class-based exports aren't re-injected
+                    already_defined = (f"def {fn_name}" in code or f"class {fn_name}" in code)
+                    if not already_defined:
                         code += f"\n\n{fn_body}\n"
 
         # settings.py: ensure extra .env vars don't crash startup and all
