@@ -432,6 +432,17 @@ Rules:
         # sympy.diffgeom: AI-hallucinated names → correct equivalents
         ("BaseOneForm", "OneForm"),
 
+        # Relative imports that escape the top-level package → absolute imports
+        # e.g. "from ..config.settings import X" → "from config.settings import X"
+        ("from ..config.", "from config."),
+        ("from ..agents.", "from agents."),
+        ("from ..knowledge.", "from knowledge."),
+        ("from ..memory.", "from memory."),
+        ("from ..thinking.", "from thinking."),
+        ("from ..physics.", "from physics."),
+        ("from ..discovery.", "from discovery."),
+        ("from ..interface.", "from interface."),
+
         # pydantic v2: BaseSettings moved to pydantic-settings
         # Handle "from pydantic import BaseSettings, Field, ..." patterns
         ("from pydantic import BaseSettings",
