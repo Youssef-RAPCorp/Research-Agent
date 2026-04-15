@@ -435,8 +435,28 @@ Rules:
     @classmethod
     def _patch_code(cls, code: str) -> str:
         """Apply known compatibility fixes to generated code."""
+        import re
         for old, new in cls._PATCHES:
             code = code.replace(old, new)
+
+        # Ensure pydantic validators are imported when used
+        pydantic_names = ["field_validator", "model_validator", "field_serializer",
+                          "ConfigDict", "Field", "validator"]
+        for name in pydantic_names:
+            in_use = re.search(rf'\b{name}\b', code)
+            already_imported = re.search(rf'from pydantic(?:_settings)? import[^\n]*\b{name}\b', code)
+            if in_use and not already_imported:
+                # Append to existing pydantic import line if present, else add new line
+                if re.search(r'from pydantic import', code):
+                    code = re.sub(
+                        r'(from pydantic import )([^\n]+)',
+                        lambda m: m.group(0) if name in m.group(2)
+                                  else f"{m.group(1)}{m.group(2)}, {name}",
+                        code, count=1
+                    )
+                else:
+                    code = f"from pydantic import {name}\n" + code
+
         return code
 
 # ─────────────────────────────────────────────
