@@ -1156,6 +1156,13 @@ class Installer:
                     raise RuntimeError(f"Generated code has syntax error: {err_msg}")
                 out = Path(mod["path"])
                 out.parent.mkdir(parents=True, exist_ok=True)
+                # Ensure the package directory has an __init__.py
+                init = out.parent / "__init__.py"
+                if not init.exists():
+                    init.write_text(
+                        INIT_TEMPLATE.format(pkg=out.parent.name.capitalize()),
+                        encoding="utf-8"
+                    )
                 out.write_text(code, encoding="utf-8")
                 # Verify the written file reads back and compiles cleanly
                 written = out.read_text(encoding="utf-8")
