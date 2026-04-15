@@ -271,6 +271,8 @@ REGISTRY = [
    "desc":"Top-level theory construction from axioms: assumption challenging, conjecture generation, theory space navigation, analogy detection."},
   {"phase":5,"id":"peer_review_agent",    "name":"Peer Review Agent",         "complexity":9, "path":"agents/peer_review.py",
    "desc":"Internal peer review with adversarial self-play: devil's advocate attack, steelmanning competitor theories, recovery protocol."},
+  {"phase":5,"id":"synthesis_agent",      "name":"Synthesis Agent",           "complexity":8, "path":"agents/synthesis_agent.py",
+   "desc":"Synthesizes outputs from multiple specialist agents into a coherent final response: evidence aggregation, conflict resolution, confidence weighting, and citation formatting."},
 
   # Phase 6 — Physics Core
   {"phase":6,"id":"first_principles",     "name":"First Principles Engine",   "complexity":12,"path":"physics/first_principles.py",
@@ -1158,6 +1160,69 @@ class Installer:
         py_files = [Path(m["path"]) for m in REGISTRY if m["path"].endswith(".py")]
         scan_files = py_files + [Path("main.py")]
         path_map = {p.as_posix(): p for p in py_files if p.exists()}
+
+        # Collect all missing project-internal module files referenced by imports
+        missing_modules: dict = {}  # path_str -> set of imported names
+        for src_file in scan_files:
+            if not src_file.exists():
+                continue
+            try:
+                src = src_file.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            for m in re.finditer(r'^(?:from|import) ([\w.]+)', src, re.MULTILINE):
+                mod_dotted = m.group(1)
+                target_path = mod_dotted.replace(".", "/") + ".py"
+                if not Path(target_path).exists() and (
+                    target_path.startswith("agents/") or
+                    target_path.startswith("config/") or
+                    target_path.startswith("knowledge/") or
+                    target_path.startswith("memory/") or
+                    target_path.startswith("thinking/") or
+                    target_path.startswith("physics/") or
+                    target_path.startswith("discovery/")
+                ):
+                    missing_modules.setdefault(target_path, mod_dotted)
+
+        # Also handle relative imports like "from .arxiv_search_agent import ..."
+        for src_file in scan_files:
+            if not src_file.exists():
+                continue
+            try:
+                src = src_file.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            pkg = src_file.parent.as_posix()  # e.g. "agents"
+            for m in re.finditer(r'^from \.([\w]+) import', src, re.MULTILINE):
+                rel_name = m.group(1)
+                target_path = f"{pkg}/{rel_name}.py"
+                if not Path(target_path).exists():
+                    missing_modules.setdefault(target_path, f"{pkg.replace('/', '.')}.{rel_name}")
+
+        if missing_modules:
+            self.log.warn(f"  Found {len(missing_modules)} missing module file(s) — generating now")
+            known_paths = {m["path"] for m in REGISTRY}
+            for target_path, mod_dotted in missing_modules.items():
+                if target_path in known_paths:
+                    continue  # already in registry, will be handled normally
+                mod_name = Path(target_path).stem
+                pkg = Path(target_path).parent.name
+                synthetic_mod = {
+                    "id": mod_name,
+                    "name": mod_name.replace("_", " ").title(),
+                    "complexity": 7,
+                    "path": target_path,
+                    "desc": (
+                        f"Auto-discovered {pkg} module '{mod_name}': implement all classes and "
+                        f"functions imported by other modules in this project. "
+                        f"Infer the interface from context and the module name."
+                    ),
+                }
+                self.log.info(f"  Generating missing module: {target_path}")
+                result = self._install_module(synthetic_mod)
+                if result and result != "skipped":
+                    self.installed += 1
+                    repaired += 1
 
         for src_file in scan_files:
             if not src_file.exists():
