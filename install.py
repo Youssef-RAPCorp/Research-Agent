@@ -755,6 +755,7 @@ python-dotenv>=1.0.0
 tenacity>=9.0.0
 rich>=13.7.0
 aiofiles>=24.1.0
+tiktoken>=0.7.0
 """
 
 REGISTRY_PY = '''"""
