@@ -758,7 +758,9 @@ class Installer:
 
     @staticmethod
     def _check_syntax(code: str, path_hint: str) -> tuple[bool, str]:
-        """Returns (is_valid, error_message)."""
+        """Returns (is_valid, error_message). Non-Python files always pass."""
+        if not path_hint.endswith(".py"):
+            return True, ""
         try:
             compile(code, path_hint, "exec")
             return True, ""
@@ -780,7 +782,7 @@ class Installer:
             if not is_stub and valid_syntax:
                 self.skipped += 1
                 self.log.muted(f"  {mod['name']} — already installed, skipping")
-                return True
+                return "skipped"
             elif not valid_syntax:
                 self.log.warn(f"  {mod['name']} — syntax error in existing file ({err_msg}), regenerating")
 
@@ -840,8 +842,10 @@ class Installer:
                          else "Claude Opus" if c<=10 else "Ensemble")
                 self.log.info(f"  Installing: {mod['name']}  [c={c} | {agent}]")
 
-                ok = self._install_module(mod)
-                if ok:
+                result = self._install_module(mod)
+                if result == "skipped":
+                    pass  # self.skipped already incremented inside _install_module
+                elif result:
                     self.installed += 1
                 else:
                     self.failed_ids.append(mod["id"])
