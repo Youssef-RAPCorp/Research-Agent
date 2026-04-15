@@ -261,6 +261,8 @@ REGISTRY = [
    "desc":"Master coordinator: receives user query, decomposes into subtasks, assigns to specialist agents, collects and synthesizes results."},
   {"phase":5,"id":"vector_search_agent",  "name":"Vector Search Agent",       "complexity":7, "path":"agents/vector_search_agent.py",
    "desc":"Semantic search agent wrapping the Qdrant vector store and embedding pipeline: query encoding, similarity search, hybrid retrieval, and ranked result formatting."},
+  {"phase":5,"id":"arxiv_search_agent",   "name":"ArXiv Search Agent",        "complexity":7, "path":"agents/arxiv_search_agent.py",
+   "desc":"ArXiv search agent: query formulation, paper retrieval via the arxiv API, abstract parsing, relevance ranking, and structured result formatting for downstream agents."},
   {"phase":5,"id":"research_agent",       "name":"Research Agent",            "complexity":9, "path":"agents/research_agent.py",
    "desc":"Drives the 13-agent knowledge swarm: dispatches parallel ArXiv/vector searches, synthesizes retrieved knowledge into structured insights."},
   {"phase":5,"id":"math_agent",           "name":"Math Derivation Agent",     "complexity":11,"path":"agents/math_agent.py",
