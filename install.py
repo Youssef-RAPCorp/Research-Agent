@@ -405,7 +405,7 @@ Rules:
                 code = code[code.index("\n") + 1:] if "\n" in code else ""
             if "\n```" in code:
                 code = code[:code.rfind("\n```")]
-            code = self._patch_code(code.strip())
+            code = self._patch_code(code.strip(), path_hint=module["path"])
             return code, data.get("usage", {}).get("output_tokens", 0)
 
     # Known compatibility fixes applied to every generated Python file
@@ -435,10 +435,15 @@ Rules:
     ]
 
     @classmethod
-    def _patch_code(cls, code: str) -> str:
+    def _patch_code(cls, code: str, path_hint: str = "") -> str:
         """Apply known compatibility fixes to generated code."""
         for old, new in cls._PATCHES:
             code = code.replace(old, new)
+
+        # config/settings.py must expose get_settings() — add it if missing
+        if path_hint.endswith("config/settings.py") or path_hint.endswith("config\\settings.py"):
+            if "def get_settings" not in code:
+                code += "\n\n_settings_cache: 'Settings | None' = None\n\ndef get_settings() -> 'Settings':\n    global _settings_cache\n    if _settings_cache is None:\n        _settings_cache = Settings()\n    return _settings_cache\n"
 
         # Ensure any pydantic v2 names used in the file are actually imported
         PYDANTIC_NAMES = [
@@ -851,7 +856,7 @@ class Installer:
             is_stub = "raise NotImplementedError" in content
             # Apply compatibility patches to existing files
             if not is_stub and out.suffix == ".py":
-                patched = self.claude._patch_code(content)
+                patched = self.claude._patch_code(content, path_hint=mod["path"])
                 if patched != content:
                     out.write_text(patched, encoding="utf-8")
                     content = patched
