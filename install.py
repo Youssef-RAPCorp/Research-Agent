@@ -369,6 +369,7 @@ Rules:
 - Be concise — prioritize complete, working code over verbose comments
 - Only import from modules listed above or standard library / requirements.txt packages
 - Use `from pydantic_settings import BaseSettings` (NOT `from pydantic import BaseSettings`)
+- All BaseSettings fields must have a default value (use `Field(default=...)` or `= "default"`) so the app starts without every env var set
 """
 
         complexity = module.get("complexity", 5)
@@ -502,6 +503,9 @@ DISCOVERY_START_HOUR=23            # 11 PM local
 DISCOVERY_END_HOUR=6               # 6 AM local
 DISCOVERY_MAX_COST_USD=2.00        # cost cap per night
 DISCOVERY_MAX_HYPOTHESES=20
+
+# ── Security ──────────────────────────────────────────────────
+SECRET_KEY=change-me-in-production
 
 # ── Research ──────────────────────────────────────────────────
 ARXIV_MAX_RESULTS=50
