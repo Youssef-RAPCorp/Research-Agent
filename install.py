@@ -415,6 +415,12 @@ Rules:
 
     # Known compatibility fixes applied to every generated Python file
     _PATCHES = [
+        # aioredis is broken on Python 3.11+ — replace with redis.asyncio
+        ("import aioredis",
+         "import redis.asyncio as aioredis"),
+        ("from aioredis",
+         "from redis.asyncio"),
+
         # pydantic v2: BaseSettings moved to pydantic-settings
         # Handle "from pydantic import BaseSettings, Field, ..." patterns
         ("from pydantic import BaseSettings",
