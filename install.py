@@ -342,6 +342,12 @@ class ClaudeClient:
         lang = "YAML" if is_yaml else "Bash" if is_shell else "Python"
         only = "YAML config" if is_yaml else "Bash script" if is_shell else "Python code with type hints and docstrings"
 
+        # Build import map so generated code uses correct module paths
+        import_map = "\n".join(
+            f"  from {m['path'][:-3].replace('/', '.')} import ..."
+            for m in REGISTRY if m["path"].endswith(".py")
+        )
+
         prompt = f"""{detail}
 
 Module: {module['name']}
@@ -350,6 +356,9 @@ Purpose: {module['desc']}
 System: Physics Discovery System v3.0 for RAP Corp (Renaissance of American Physics)
 Language: {lang}
 
+Available module import paths (use EXACTLY these, do not invent others):
+{import_map}
+
 Rules:
 - Return ONLY {only}
 - No markdown fences, no explanation text
@@ -357,6 +366,7 @@ Rules:
 - Add TODO markers only for API key / external service integration points
 - Async-first in Python where appropriate
 - Be concise — prioritize complete, working code over verbose comments
+- Only import from modules listed above or standard library / requirements.txt packages
 """
 
         complexity = module.get("complexity", 5)
