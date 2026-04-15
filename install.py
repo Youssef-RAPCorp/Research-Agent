@@ -374,6 +374,7 @@ Rules:
 - config/logger.py must define a `get_logger(name)` factory function
 - config/errors.py must define a `handle_error(e)` function
 - config/firebase.py must define a `get_firebase_client()` factory function
+- agents/orchestrator.py must define a class named exactly `PhysicsOrchestrator` with an async `run(self, query, mode, pattern)` method
 """
 
         complexity = module.get("complexity", 5)
@@ -454,6 +455,9 @@ Rules:
             ],
             "config/firebase.py": [
                 ("get_firebase_client", "def get_firebase_client():\n    return FirebaseClient()"),
+            ],
+            "agents/orchestrator.py": [
+                ("PhysicsOrchestrator", "class PhysicsOrchestrator:\n    async def run(self, query: str, mode: str = 'standard', pattern: str = 'down_adaptive'):\n        raise NotImplementedError('PhysicsOrchestrator.run not yet implemented')"),
             ],
             "config/errors.py": [
                 ("handle_error", "def handle_error(e: Exception) -> None:\n    import logging\n    logging.getLogger(__name__).error(str(e), exc_info=True)"),
@@ -989,11 +993,12 @@ class Installer:
                     names.add(tok)
             return names
 
-        # Collect all project .py paths
+        # Collect all project .py paths (registry + entry points)
         py_files = [Path(m["path"]) for m in REGISTRY if m["path"].endswith(".py")]
+        scan_files = py_files + [Path("main.py")]
         path_map = {p.as_posix(): p for p in py_files if p.exists()}
 
-        for src_file in py_files:
+        for src_file in scan_files:
             if not src_file.exists():
                 continue
             try:
