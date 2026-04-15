@@ -701,6 +701,7 @@ google-generativeai>=0.8.0
 # ── Vector DB ────────────────────────────────────────────────
 qdrant-client>=1.9.0
 sentence-transformers>=3.0.0
+rank-bm25>=0.2.2
 
 # ── Symbolic Math ─────────────────────────────────────────────
 sympy>=1.13.0
