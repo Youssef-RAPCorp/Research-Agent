@@ -534,6 +534,22 @@ Rules:
                             end = class_match.end()
                             code = code[:end] + "\n" + "\n".join(additions) + "\n" + code[end:]
 
+        # registry.py: replace any stub register_agent with a working decorator
+        if ph.endswith("agents/registry.py"):
+            import re as _re
+            stub_pattern = r'def register_agent\([^)]*\):[^\n]*\n(?:[ \t]+[^\n]*\n)*?[ \t]+raise NotImplementedError\([^\)]*\)[^\n]*\n?'
+            working_register_agent = (
+                "def register_agent(name: str):\n"
+                "    def decorator(cls):\n"
+                "        _agent_registry[name] = cls\n"
+                "        return cls\n"
+                "    return decorator\n"
+            )
+            if _re.search(stub_pattern, code):
+                code = _re.sub(stub_pattern, working_register_agent, code)
+                if "_agent_registry" not in code:
+                    code = "_agent_registry = {}\n\n" + code
+
         # Ensure any pydantic v2 names used in the file are actually imported
         PYDANTIC_NAMES = [
             "field_validator", "model_validator", "field_serializer", "ConfigDict",
