@@ -370,6 +370,10 @@ Rules:
 - Only import from modules listed above or standard library / requirements.txt packages
 - Use `from pydantic_settings import BaseSettings` (NOT `from pydantic import BaseSettings`)
 - All BaseSettings fields must have a default value (use `Field(default=...)` or `= "default"`) so the app starts without every env var set
+- config/settings.py must define a `get_settings()` factory function
+- config/logger.py must define a `get_logger(name)` factory function
+- config/errors.py must define a `handle_error(e)` function
+- config/firebase.py must define a `get_firebase_client()` factory function
 """
 
         complexity = module.get("complexity", 5)
@@ -440,10 +444,27 @@ Rules:
         for old, new in cls._PATCHES:
             code = code.replace(old, new)
 
-        # config/settings.py must expose get_settings() — add it if missing
-        if path_hint.endswith("config/settings.py") or path_hint.endswith("config\\settings.py"):
-            if "def get_settings" not in code:
-                code += "\n\n_settings_cache: 'Settings | None' = None\n\ndef get_settings() -> 'Settings':\n    global _settings_cache\n    if _settings_cache is None:\n        _settings_cache = Settings()\n    return _settings_cache\n"
+        # Ensure known required exports exist in their respective modules
+        REQUIRED_EXPORTS = {
+            "config/settings.py": [
+                ("get_settings", "_settings_cache = None\n\ndef get_settings():\n    global _settings_cache\n    if _settings_cache is None:\n        _settings_cache = Settings()\n    return _settings_cache"),
+            ],
+            "config/logger.py": [
+                ("get_logger", "def get_logger(name: str = __name__):\n    import logging\n    return logging.getLogger(name)"),
+            ],
+            "config/firebase.py": [
+                ("get_firebase_client", "def get_firebase_client():\n    return FirebaseClient()"),
+            ],
+            "config/errors.py": [
+                ("handle_error", "def handle_error(e: Exception) -> None:\n    import logging\n    logging.getLogger(__name__).error(str(e), exc_info=True)"),
+            ],
+        }
+        ph = path_hint.replace("\\", "/")
+        for file_path, exports in REQUIRED_EXPORTS.items():
+            if ph.endswith(file_path):
+                for fn_name, fn_body in exports:
+                    if f"def {fn_name}" not in code:
+                        code += f"\n\n{fn_body}\n"
 
         # Ensure any pydantic v2 names used in the file are actually imported
         PYDANTIC_NAMES = [
