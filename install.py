@@ -15,6 +15,7 @@ Requires:
 """
 
 import os
+import re
 import sys
 import platform
 import subprocess
@@ -435,27 +436,30 @@ Rules:
     @classmethod
     def _patch_code(cls, code: str) -> str:
         """Apply known compatibility fixes to generated code."""
-        import re
         for old, new in cls._PATCHES:
             code = code.replace(old, new)
 
-        # Ensure pydantic validators are imported when used
-        pydantic_names = ["field_validator", "model_validator", "field_serializer",
-                          "ConfigDict", "Field", "validator"]
-        for name in pydantic_names:
-            in_use = re.search(rf'\b{name}\b', code)
-            already_imported = re.search(rf'from pydantic(?:_settings)? import[^\n]*\b{name}\b', code)
-            if in_use and not already_imported:
-                # Append to existing pydantic import line if present, else add new line
-                if re.search(r'from pydantic import', code):
-                    code = re.sub(
-                        r'(from pydantic import )([^\n]+)',
-                        lambda m: m.group(0) if name in m.group(2)
-                                  else f"{m.group(1)}{m.group(2)}, {name}",
-                        code, count=1
-                    )
+        # Ensure any pydantic v2 names used in the file are actually imported
+        PYDANTIC_NAMES = [
+            "field_validator", "model_validator", "field_serializer", "ConfigDict",
+        ]
+        for name in PYDANTIC_NAMES:
+            used = re.search(rf'(?<!["\'\w]){re.escape(name)}(?!["\'\w])', code)
+            imported = re.search(rf'^from pydantic import[^\n]*\b{re.escape(name)}\b', code, re.MULTILINE)
+            if used and not imported:
+                # Find first non-docstring, non-comment line to insert after
+                existing = re.search(r'^(from pydantic import .+)$', code, re.MULTILINE)
+                if existing:
+                    # Add to the existing pydantic import line
+                    code = code[:existing.end()] + f", {name}" + code[existing.end():]
                 else:
-                    code = f"from pydantic import {name}\n" + code
+                    # Insert a new import after the last import block
+                    last_import = list(re.finditer(r'^(?:import |from )\S+', code, re.MULTILINE))
+                    if last_import:
+                        pos = last_import[-1].end()
+                        code = code[:pos] + f"\nfrom pydantic import {name}" + code[pos:]
+                    else:
+                        code = f"from pydantic import {name}\n" + code
 
         return code
 
