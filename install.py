@@ -367,6 +367,7 @@ Rules:
 - Async-first in Python where appropriate
 - Be concise — prioritize complete, working code over verbose comments
 - Only import from modules listed above or standard library / requirements.txt packages
+- Use `from pydantic_settings import BaseSettings` (NOT `from pydantic import BaseSettings`)
 """
 
         complexity = module.get("complexity", 5)
@@ -399,12 +400,42 @@ Rules:
             code = data["content"][0]["text"].strip()
             # Strip markdown fences Claude sometimes returns despite instructions
             if code.startswith("```"):
-                # Remove opening fence line (e.g. ```python)
                 code = code[code.index("\n") + 1:] if "\n" in code else ""
-            # Remove closing fence and anything after it
             if "\n```" in code:
                 code = code[:code.rfind("\n```")]
-            return code.strip(), data.get("usage", {}).get("output_tokens", 0)
+            code = self._patch_code(code.strip())
+            return code, data.get("usage", {}).get("output_tokens", 0)
+
+    # Known compatibility fixes applied to every generated Python file
+    _PATCHES = [
+        # pydantic v2: BaseSettings moved to pydantic-settings
+        ("from pydantic import BaseSettings",
+         "from pydantic_settings import BaseSettings"),
+        ("from pydantic import BaseSettings, ",
+         "from pydantic_settings import BaseSettings\nfrom pydantic import "),
+        # pydantic v2: validator → field_validator
+        ("from pydantic import validator",
+         "from pydantic import field_validator"),
+        # pydantic v2: @validator decorator
+        ("@validator(",
+         "@field_validator("),
+        # pydantic v2: schema() removed
+        (".schema()",
+         ".model_json_schema()"),
+        # pydantic v2: .dict() removed
+        (".dict()",
+         ".model_dump()"),
+        # pydantic v2: .json() removed
+        (".json()",
+         ".model_dump_json()"),
+    ]
+
+    @classmethod
+    def _patch_code(cls, code: str) -> str:
+        """Apply known compatibility fixes to generated code."""
+        for old, new in cls._PATCHES:
+            code = code.replace(old, new)
+        return code
 
 # ─────────────────────────────────────────────
 # PROJECT SCAFFOLD
@@ -788,6 +819,13 @@ class Installer:
             except Exception:
                 content = ""
             is_stub = "raise NotImplementedError" in content
+            # Apply compatibility patches to existing files
+            if not is_stub and out.suffix == ".py":
+                patched = self.claude._patch_code(content)
+                if patched != content:
+                    out.write_text(patched, encoding="utf-8")
+                    content = patched
+                    self.log.ok(f"  {mod['name']} — patched compatibility fixes")
             valid_syntax, err_msg = self._check_syntax(content, str(out))
             if not is_stub and valid_syntax:
                 self.skipped += 1
