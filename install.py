@@ -1352,6 +1352,107 @@ class Installer:
         else:
             self.log.ok("  All exports verified")
 
+    # ── Auto-heal imports ─────────────────────────────────────────────────
+
+    PROJECT_PKGS = {
+        "agents","config","knowledge","memory",
+        "thinking","physics","discovery","interface","utils",
+    }
+
+    def _auto_heal_imports(self):
+        """
+        Scan every generated .py file for imports.
+        • Third-party packages that aren't importable  → pip install
+        • Project-internal module files that don't exist → generate via Claude
+        This runs after _repair_missing_exports so the project tree is as
+        complete as possible before we attempt imports.
+        """
+        import importlib, subprocess as sp
+
+        self.log.phase("─── Step 5c: Auto-healing imports")
+
+        py_files = [Path(m["path"]) for m in REGISTRY if m["path"].endswith(".py")]
+        scan_files = py_files + [Path("main.py")]
+
+        missing_pip: set = set()
+        missing_project: dict = {}   # path → dotted module name
+
+        STDLIB = sys.stdlib_module_names if hasattr(sys, "stdlib_module_names") else set()
+
+        for src_file in scan_files:
+            if not src_file.exists():
+                continue
+            try:
+                src = src_file.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+
+            for m in re.finditer(
+                r'^(?:import ([\w.]+)|from ([\w.]+) import)', src, re.MULTILINE
+            ):
+                dotted = m.group(1) or m.group(2)
+                top = dotted.split(".")[0]
+                if not top or top.startswith("_"):
+                    continue
+                if top in STDLIB:
+                    continue
+
+                if top in self.PROJECT_PKGS:
+                    # Check the specific file exists
+                    target_path = dotted.replace(".", "/") + ".py"
+                    if not Path(target_path).exists():
+                        missing_project.setdefault(target_path, dotted)
+                else:
+                    # Third-party: try importing
+                    try:
+                        importlib.import_module(top)
+                    except ImportError:
+                        missing_pip.add(top)
+
+        # ── pip install missing packages ──────────────────────────────────
+        if missing_pip:
+            pip = self.os.venv_pip if Path(self.os.venv_pip).exists() else sys.executable
+            pip_cmd = [pip, "install"] if pip.endswith("pip") else [pip, "-m", "pip", "install"]
+            self.log.info(f"  pip-installing {len(missing_pip)} missing package(s): {', '.join(sorted(missing_pip))}")
+            for pkg in sorted(missing_pip):
+                try:
+                    sp.check_call(pip_cmd + [pkg],
+                                  stdout=sp.DEVNULL, stderr=sp.DEVNULL)
+                    self.log.ok(f"  {pkg} installed")
+                except Exception as exc:
+                    self.log.warn(f"  {pkg} install failed: {exc}")
+        else:
+            self.log.ok("  All third-party imports satisfied")
+
+        # ── generate missing project modules ─────────────────────────────
+        known_paths = {m["path"] for m in REGISTRY}
+        generated = 0
+        for target_path, dotted in missing_project.items():
+            if target_path in known_paths:
+                continue
+            mod_name = Path(target_path).stem
+            pkg = Path(target_path).parent.name
+            synthetic_mod = {
+                "id": mod_name,
+                "name": mod_name.replace("_", " ").title(),
+                "complexity": 6,
+                "path": target_path,
+                "desc": (
+                    f"Auto-discovered module '{dotted}': implement all classes and "
+                    f"functions that other project modules import from here. "
+                    f"Infer the full interface from the module name and package context ({pkg})."
+                ),
+            }
+            self.log.info(f"  Generating missing module: {target_path}")
+            result = self._install_module(synthetic_mod)
+            if result and result != "skipped":
+                generated += 1
+
+        if generated:
+            self.log.ok(f"  {generated} missing project module(s) generated")
+        elif not missing_project:
+            self.log.ok("  All project module files present")
+
     # ── Virtual env hint ──────────────────────────────────────────────────
 
     def _venv_hint(self):
@@ -1426,6 +1527,7 @@ class Installer:
         self.claude = ClaudeClient(api_key)
         self._scaffold()
         self._run_phases()
+        self._auto_heal_imports()
         self._venv_hint()
         self._os_notes()
         self._summary()
