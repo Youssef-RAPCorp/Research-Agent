@@ -961,6 +961,79 @@ class Installer:
                 print(f"  {C.DIM}[{bar}] {pct}%  {done}/{TOTAL}{C.RESET}", end="\r")
 
         print()
+        self._repair_missing_exports()
+
+    # ── Repair missing exports ────────────────────────────────────────────
+
+    def _repair_missing_exports(self):
+        """
+        Scan all generated .py files for project-internal imports, then check
+        whether the imported names actually exist in the target file.
+        If anything is missing, inject a minimal stub so imports don't fail.
+        """
+        self.log.phase("─── Step 5b: Repairing missing exports")
+        repaired = 0
+
+        # Map module path → set of names defined at top level
+        def defined_names(path: Path) -> set:
+            try:
+                src = path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                return set()
+            names = set()
+            for m in re.finditer(r'^(?:def |class |(\w+)\s*=)', src, re.MULTILINE):
+                if m.lastindex and m.group(1):
+                    names.add(m.group(1))
+                else:
+                    tok = src[m.start():].split("(")[0].split()[1]
+                    names.add(tok)
+            return names
+
+        # Collect all project .py paths
+        py_files = [Path(m["path"]) for m in REGISTRY if m["path"].endswith(".py")]
+        path_map = {p.as_posix(): p for p in py_files if p.exists()}
+
+        for src_file in py_files:
+            if not src_file.exists():
+                continue
+            try:
+                src = src_file.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+
+            # Find all "from x.y import a, b, c" where x.y is a project module
+            for m in re.finditer(r'^from ([\w.]+) import ([\w, ]+)', src, re.MULTILINE):
+                mod_dotted = m.group(1)           # e.g. "config.errors"
+                imported   = [n.strip() for n in m.group(2).split(",")]
+                target_path = mod_dotted.replace(".", "/") + ".py"
+
+                target = Path(target_path)
+                if not target.exists():
+                    continue
+
+                defs = defined_names(target)
+                missing = [n for n in imported if n and n not in defs]
+                if not missing:
+                    continue
+
+                # Append stubs for missing names
+                additions = []
+                for name in missing:
+                    # Decide stub type: Exception subclass or simple function
+                    if name.endswith("Error") or name.endswith("Exception"):
+                        additions.append(f"\nclass {name}(Exception):\n    pass\n")
+                    else:
+                        additions.append(f"\ndef {name}(*args, **kwargs):\n    raise NotImplementedError('{name} not yet implemented')\n")
+
+                existing = target.read_text(encoding="utf-8", errors="replace")
+                target.write_text(existing + "\n" + "".join(additions), encoding="utf-8")
+                self.log.ok(f"  {target_path} — added stubs: {', '.join(missing)}")
+                repaired += len(missing)
+
+        if repaired:
+            self.log.ok(f"  {repaired} missing export(s) stubbed")
+        else:
+            self.log.ok("  All exports verified")
 
     # ── Virtual env hint ──────────────────────────────────────────────────
 
