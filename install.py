@@ -429,6 +429,9 @@ Rules:
         ("from aioredis",
          "from redis.asyncio"),
 
+        # sympy.diffgeom: AI-hallucinated names → correct equivalents
+        ("BaseOneForm", "OneForm"),
+
         # pydantic v2: BaseSettings moved to pydantic-settings
         # Handle "from pydantic import BaseSettings, Field, ..." patterns
         ("from pydantic import BaseSettings",
