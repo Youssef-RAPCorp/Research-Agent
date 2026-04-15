@@ -834,6 +834,10 @@ class AgentRegistry:
             except Exception as exc:
                 logger.error(f"Error shutting down {name}: {exc}")
         self._instances.clear()
+
+
+# ── Module-level singleton — generated agents call agent_registry.register() ─
+agent_registry = AgentRegistry()
 '''
 
 TEST_TEMPLATE = '''"""
@@ -1011,12 +1015,15 @@ class Installer:
             ("main.py",            MAIN_PY),
             ("tests/__init__.py",  ""),
             ("tests/test_system.py", TEST_TEMPLATE),
-            # registry.py is hardcoded — AI-generated versions reliably stub register_agent
-            ("agents/registry.py", REGISTRY_PY),
         ]:
             p = Path(fpath)
             if not p.exists():
                 p.write_text(content, encoding="utf-8")
+
+        # registry.py is always force-written from the hardcoded template —
+        # AI-generated versions reliably stub register_agent and AgentRegistry
+        Path("agents/registry.py").write_text(REGISTRY_PY, encoding="utf-8")
+        self.log.ok("  agents/registry.py — hardcoded template written")
         self.log.ok(f"{len(DIRS)} directories + scaffolding files created")
 
     # ── Install a single module ───────────────────────────────────────────
