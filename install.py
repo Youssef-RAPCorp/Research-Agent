@@ -528,6 +528,13 @@ Rules:
         """Apply known compatibility fixes to generated code."""
         for old, new in cls._PATCHES:
             code = code.replace(old, new)
+
+        # Fix relative imports that escape the top-level package.
+        # "from ..config.settings import X"  →  "from config.settings import X"
+        # "from .. import X"  →  removed (no valid target at top level)
+        code = re.sub(r'from \.\.([\w])', r'from \1', code)
+        code = re.sub(r'^from \.\. import .+\n?', '', code, flags=re.MULTILINE)
+
         code = cls._fix_bad_imports(code)
 
         # Ensure known required exports exist in their respective modules
