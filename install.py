@@ -370,6 +370,8 @@ Rules:
 - Only import from modules listed above or standard library / requirements.txt packages
 - Use `from pydantic_settings import BaseSettings` (NOT `from pydantic import BaseSettings`)
 - All BaseSettings fields must have a default value (use `Field(default=...)` or `= "default"`) so the app starts without every env var set
+- config/settings.py Settings class MUST use `model_config = ConfigDict(extra="ignore", env_file=".env", case_sensitive=False)` — NEVER use extra="forbid" as the .env has more vars than the model
+- config/settings.py Settings class MUST define fields for: anthropic_api_key, google_api_key, qdrant_host, qdrant_port, qdrant_api_key, embedding_model, retrieval_top_k, firebase_project_id, firebase_credentials_path, secret_key, arxiv_max_results
 - config/settings.py must define a `get_settings()` factory function
 - config/logger.py must define a `get_logger(name)` factory function
 - config/errors.py must define a `handle_error(e)` function
@@ -475,6 +477,53 @@ Rules:
                 for fn_name, fn_body in exports:
                     if f"def {fn_name}" not in code:
                         code += f"\n\n{fn_body}\n"
+
+        # settings.py: ensure extra .env vars don't crash startup and all
+        # required fields are present (AI-gen sometimes omits them)
+        if ph.endswith("config/settings.py"):
+            import re as _re
+            # Replace extra='forbid' with extra='ignore' so unknown env vars are silently dropped
+            code = _re.sub(r"extra\s*=\s*['\"]forbid['\"]", "extra='ignore'", code)
+            # If no model_config at all, inject one into the Settings class body
+            if "model_config" not in code and "class Settings" in code:
+                code = _re.sub(
+                    r'(class Settings\([^)]*\):[ \t]*\n(?:[ \t]+"""[^"]*"""[ \t]*\n)?)',
+                    r'\1    model_config = ConfigDict(extra="ignore", env_file=".env", case_sensitive=False)\n',
+                    code,
+                )
+            # Inject any missing required fields that appear in the .env template
+            REQUIRED_FIELDS = [
+                ("anthropic_api_key", 'anthropic_api_key: str = Field(default="", env="ANTHROPIC_API_KEY")'),
+                ("google_api_key",    'google_api_key: str = Field(default="", env="GOOGLE_API_KEY")'),
+                ("qdrant_host",       'qdrant_host: str = Field(default="localhost", env="QDRANT_HOST")'),
+                ("qdrant_port",       'qdrant_port: int = Field(default=6333, env="QDRANT_PORT")'),
+                ("qdrant_api_key",    'qdrant_api_key: str = Field(default="", env="QDRANT_API_KEY")'),
+                ("embedding_model",   'embedding_model: str = Field(default="BAAI/bge-large-en-v1.5", env="EMBEDDING_MODEL")'),
+                ("retrieval_top_k",   'retrieval_top_k: int = Field(default=10, env="RETRIEVAL_TOP_K")'),
+                ("firebase_project_id",       'firebase_project_id: str = Field(default="", env="FIREBASE_PROJECT_ID")'),
+                ("firebase_credentials_path", 'firebase_credentials_path: str = Field(default="./firebase-credentials.json", env="FIREBASE_CREDENTIALS_PATH")'),
+                ("secret_key",        'secret_key: str = Field(default="change-me-in-production", env="SECRET_KEY")'),
+                ("arxiv_max_results", 'arxiv_max_results: int = Field(default=50, env="ARXIV_MAX_RESULTS")'),
+            ]
+            if "class Settings" in code:
+                # Find indented body of Settings class to append fields
+                class_match = _re.search(r'(class Settings\([^)]*\):.*?)(?=\nclass |\Z)', code, _re.DOTALL)
+                if class_match:
+                    class_body = class_match.group(0)
+                    additions = []
+                    for field_name, field_def in REQUIRED_FIELDS:
+                        if field_name not in class_body:
+                            additions.append(f"    {field_def}")
+                    if additions:
+                        # Insert before the first method (def) or at the end of the class body
+                        insert_point = _re.search(r'\n    def ', class_body)
+                        if insert_point:
+                            pos = class_match.start() + insert_point.start()
+                            code = code[:pos] + "\n" + "\n".join(additions) + code[pos:]
+                        else:
+                            # Append before end of class
+                            end = class_match.end()
+                            code = code[:end] + "\n" + "\n".join(additions) + "\n" + code[end:]
 
         # Ensure any pydantic v2 names used in the file are actually imported
         PYDANTIC_NAMES = [
