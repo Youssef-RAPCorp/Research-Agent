@@ -391,7 +391,10 @@ Rules:
             "max_tokens": max_tokens,
             "system": (
                 f"You are an expert {lang} developer specializing in AI multi-agent systems "
-                "and physics research software. Return ONLY valid code, no markdown, no explanation."
+                "and physics research software. Return ONLY valid code, no markdown, no explanation. "
+                "Target Python 3.13. Never use 'from __future__ import annotations'. "
+                "Never use types.FunctionType() or compile() with string arguments at class definition time. "
+                "Never use exec() or eval() at module or class level."
             ),
             "messages": [{"role": "user", "content": prompt}]
         }).encode("utf-8")
