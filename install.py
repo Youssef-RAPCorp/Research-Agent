@@ -549,6 +549,24 @@ Rules:
         code = re.sub(r'from \.\.([\w])', r'from \1', code)
         code = re.sub(r'^from \.\. import .+\n?', '', code, flags=re.MULTILINE)
 
+        # All agent files: inject missing BaseAgent abstract method implementations.
+        # Any class that inherits from BaseAgent must implement these or it can't
+        # be instantiated. Inject no-op defaults if missing.
+        if ph.startswith("agents/") and "BaseAgent" in code:
+            for method, body in [
+                ("_process_cycle",
+                 "    async def _process_cycle(self, *args, **kwargs):\n        pass\n"),
+                ("on_message_received",
+                 "    async def on_message_received(self, message=None, *args, **kwargs):\n        pass\n"),
+            ]:
+                if f"def {method}" not in code:
+                    # Append inside the first class that extends BaseAgent
+                    code = re.sub(
+                        r'(class \w+\([^)]*BaseAgent[^)]*\):.*?)((?=\nclass )|\Z)',
+                        lambda m, b=body: m.group(1) + "\n" + b + m.group(2),
+                        code, count=1, flags=re.DOTALL
+                    )
+
         # orchestrator.py: fix bare super().__init__() → pass required BaseAgent args
         if ph.endswith("agents/orchestrator.py"):
             code = re.sub(
