@@ -450,7 +450,12 @@ def _names_defined_in_file(src: str) -> set:
 
 
 def _build_project_name_index(scan_files: list) -> dict:
-    """Return {CamelCaseName: 'pkg.module'} for every class/func defined in the project."""
+    """
+    Return {CamelCaseName: 'pkg.module'} for every CamelCase name exported by
+    a project file, whether via 'class Foo', 'def Foo', or a top-level
+    assignment 'Foo = ...' (covers aliases like ChatEvalPattern = ChatEvaluator
+    and dynamic classes like Foo = type('Foo', ...)).
+    """
     index: dict = {}
     for pf in scan_files:
         if not pf.exists() or pf.name in ('repair.py', 'install.py', '__init__.py'):
@@ -463,7 +468,13 @@ def _build_project_name_index(scan_files: list) -> dict:
             src = pf.read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
+        # class Foo / def Foo
         for m in re.finditer(r'^(?:class|def)\s+([A-Z]\w+)\b', src, re.MULTILINE):
+            name = m.group(1)
+            if name not in index:
+                index[name] = module
+        # Top-level assignment: FooBar = ...
+        for m in re.finditer(r'^([A-Z][a-zA-Z0-9_]+)\s*=', src, re.MULTILINE):
             name = m.group(1)
             if name not in index:
                 index[name] = module
@@ -517,23 +528,25 @@ def phase1c_fix_undefined_annotations(scan_files: list) -> int:
         if not used_names:
             continue
 
-        already   = _names_defined_in_file(src)
-        to_import = [n for n in used_names
-                     if n not in already
-                     and n not in _BUILTIN_TYPES
-                     and n in name_index]
-        if not to_import:
+        already  = _names_defined_in_file(src)
+        to_fix   = [n for n in used_names
+                    if n not in already and n not in _BUILTIN_TYPES]
+        # Split: names found in project files → try/except import
+        #        names not found anywhere    → local placeholder stub
+        to_import = [n for n in to_fix if n in name_index]
+        to_stub   = [n for n in to_fix if n not in name_index]
+        if not to_import and not to_stub:
             continue
 
         new_src = src
         added: list = []
+
         for name in sorted(to_import):
-            # Re-check in current new_src (a previous iteration may have added it)
             if name in _names_defined_in_file(new_src):
                 continue
-            source_mod = name_index[name]
+            source_mod   = name_index[name]
             placeholders = f"    {name} = type('{name}', (), {{}})"
-            try_block = (
+            try_block    = (
                 f"\ntry:\n"
                 f"    from {source_mod} import {name}\n"
                 f"except ImportError:  # circular import guard — {source_mod}\n"
@@ -544,11 +557,18 @@ def phase1c_fix_undefined_annotations(scan_files: list) -> int:
             ))
             ins     = imp_matches[-1].end() if imp_matches else 0
             new_src = new_src[:ins] + try_block + new_src[ins:]
-            added.append(name)
+            added.append(f"{name}←{source_mod}")
+
+        for name in sorted(to_stub):
+            if name in _names_defined_in_file(new_src):
+                continue
+            # Append a placeholder stub at the end of the file
+            new_src += f"\n{name} = type('{name}', (), {{}})  # auto-stub: not found in project\n"
+            added.append(f"{name}(stub)")
 
         if added:
             py_file.write_text(new_src, encoding="utf-8")
-            print(f"  FIXED [undef name  ]  {py_file}  →  added imports: {added}")
+            print(f"  FIXED [undef name  ]  {py_file}  →  {added}")
             fixed += 1
     return fixed
 
