@@ -603,15 +603,10 @@ Rules:
             if "if TYPE_CHECKING:" in code and "from typing import TYPE_CHECKING" not in code:
                 code = "from typing import TYPE_CHECKING\n" + code
 
-        # Add "from __future__ import annotations" only to files that don't use
-        # Pydantic/dataclasses — those frameworks eval annotation strings at runtime
-        # and break with lazy annotations.
-        ANNOTATION_SENSITIVE = ("pydantic", "dataclass", "BaseModel", "dataclasses")
-        if any(s in code for s in ANNOTATION_SENSITIVE):
-            # Remove it if already present — it breaks Pydantic/dataclass machinery
-            code = re.sub(r'^from __future__ import annotations\n', '', code, flags=re.MULTILINE)
-        elif code and "from __future__ import annotations" not in code:
-            code = "from __future__ import annotations\n" + code
+        # Remove "from __future__ import annotations" from all generated files —
+        # it breaks Pydantic, dataclasses, and abstract base class metaclasses
+        # by converting annotations to strings that can't be used as code objects.
+        code = re.sub(r'^from __future__ import annotations\n?', '', code, flags=re.MULTILINE)
 
         code = cls._fix_bad_imports(code)
 
