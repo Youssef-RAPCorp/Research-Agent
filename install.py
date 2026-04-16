@@ -1342,7 +1342,7 @@ class Installer:
                 if m.lastindex and m.group(1):
                     names.add(m.group(1))
                 else:
-                    tok = src[m.start():].split("(")[0].split()[1]
+                    tok = src[m.start():].split("(")[0].split()[1].rstrip(":(,")
                     names.add(tok)
             return names
 
