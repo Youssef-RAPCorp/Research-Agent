@@ -784,7 +784,10 @@ def phase5_fix_abstract_methods(scan_files: list) -> int:
         new_src = src
         any_change = False
 
-        for cls_m in re.finditer(r'^class (\w+)\(([^)]+)\)\s*:', new_src, re.MULTILINE):
+        # Process in REVERSE order: later insertions don't shift positions of
+        # earlier classes that we haven't processed yet.
+        class_matches = list(re.finditer(r'^class (\w+)\(([^)]+)\)\s*:', new_src, re.MULTILINE))
+        for cls_m in reversed(class_matches):
             cls_name  = cls_m.group(1)
             bases_str = cls_m.group(2)
             bases     = [b.strip().split('.')[-1] for b in bases_str.split(',')]
@@ -796,16 +799,15 @@ def phase5_fix_abstract_methods(scan_files: list) -> int:
             if not required:
                 continue
 
-            # Get the class body text to check what's already defined
+            # Derive class body from the CURRENT new_src at cls_m's original
+            # position.  Because we go in reverse, no earlier processing has
+            # shifted cls_m's start/end yet.
             after    = new_src[cls_m.end():]
             body_end = re.search(r'\n(?=[^\s\n])', after)
             body     = after[:body_end.start()] if body_end else after
 
-            # Find insert position: just before end of class body
-            if body_end:
-                ins = cls_m.end() + body_end.start()
-            else:
-                ins = len(new_src)
+            # Insert at the end of this class body (or EOF for the last class)
+            ins = cls_m.end() + body_end.start() if body_end else len(new_src)
 
             stubs_added: list = []
             for method_name, is_async in required:
