@@ -674,13 +674,8 @@ Rules:
             # Skip if usage pattern not found, or if the name is already imported
             if not re.search(_pat, code):
                 continue
-            if re.search(rf'\b{re.escape(_guard)}\b', code.split('\n', 30)[0] if len(code) > 0 else ''):
-                continue  # already in first 30 lines
             if _imp in code:
-                continue
-            # Check if the guard name appears in any import line already
-            if re.search(rf'^(?:import|from).*\b{re.escape(_guard)}\b', code, re.MULTILINE):
-                continue
+                continue  # exact import line already present
             # Inject after the last existing import line
             _last = list(re.finditer(r'^(?:import |from )\S+', code, re.MULTILINE))
             if _last:

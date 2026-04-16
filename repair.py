@@ -289,10 +289,8 @@ def phase3_inject_missing_imports(scan_files: list) -> int:
         for pat, imp, guard in _AUTO_IMPORTS:
             if not re.search(pat, new_src):
                 continue
-            if re.search(rf'^(?:import|from).*\b{re.escape(guard)}\b', new_src, re.MULTILINE):
-                continue  # already imported
             if imp in new_src:
-                continue
+                continue  # exact import line already present
             last = list(re.finditer(r'^(?:import |from )\S+', new_src, re.MULTILINE))
             if last:
                 pos = last[-1].end()
