@@ -799,23 +799,42 @@ def phase5_fix_abstract_methods(scan_files: list) -> int:
             if not required:
                 continue
 
-            # Derive class body from the CURRENT new_src at cls_m's original
-            # position.  Because we go in reverse, no earlier processing has
-            # shifted cls_m's start/end yet.
-            after    = new_src[cls_m.end():]
-            body_end = re.search(r'\n(?=[^\s\n])', after)
-            body     = after[:body_end.start()] if body_end else after
-
-            # Insert at the end of this class body (or EOF for the last class)
-            ins = cls_m.end() + body_end.start() if body_end else len(new_src)
+            # ── Proper indentation-based class body extraction ────────────
+            # Walk line-by-line from right after the class definition colon.
+            # Only lines that start with 4+ spaces (or a tab) belong to the
+            # class body.  This is intentionally strict so we don't mistake
+            # module-level stubs (from a previous bad run) as class methods.
+            body_lines: list = []
+            last_indented_end = cls_m.end()   # fallback insert = right after class line
+            scan_pos = cls_m.end()
+            # skip to end of the class definition line
+            nl = new_src.find('\n', scan_pos)
+            scan_pos = (nl + 1) if nl != -1 else len(new_src)
+            while scan_pos < len(new_src):
+                nl = new_src.find('\n', scan_pos)
+                line_end = nl if nl != -1 else len(new_src)
+                line     = new_src[scan_pos:line_end]
+                if not line.strip():                          # blank line — keep tentatively
+                    body_lines.append(line)
+                    scan_pos = line_end + 1
+                    continue
+                if line[:1] in (' ', '\t'):                   # indented — class member
+                    body_lines.append(line)
+                    last_indented_end = line_end + 1          # char after this line's \n
+                    scan_pos = line_end + 1
+                    continue
+                break                                         # un-indented non-blank = end
+            body = '\n'.join(body_lines)
+            ins  = last_indented_end                          # insert after last real member
 
             stubs_added: list = []
             for method_name, is_async in required:
+                # Check only within the PROPERLY-BOUNDED body (indented lines only)
                 if re.search(
-                    rf'^\s+(?:async\s+)?def {re.escape(method_name)}\s*\(',
+                    rf'^[ \t]+(?:async\s+)?def {re.escape(method_name)}\s*\(',
                     body, re.MULTILINE,
                 ):
-                    continue  # already implemented
+                    continue  # already implemented inside the class
                 async_kw = "async " if is_async else ""
                 ret      = "await asyncio.sleep(0)\n        return None" if is_async else "return None"
                 stub     = (
@@ -823,8 +842,8 @@ def phase5_fix_abstract_methods(scan_files: list) -> int:
                     f"        {ret}\n"
                 )
                 new_src  = new_src[:ins] + stub + new_src[ins:]
-                ins     += len(stub)          # keep insert pos valid for next stub
-                body    += stub               # keep body in sync for dup checks
+                ins     += len(stub)
+                body    += stub
                 stubs_added.append(method_name)
 
             if stubs_added:
