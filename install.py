@@ -616,6 +616,35 @@ Rules:
         # by converting annotations to strings that can't be used as code objects.
         code = re.sub(r'^from __future__ import annotations\n?', '', code, flags=re.MULTILINE)
 
+        # Make all __init__ required positional params optional (default=None).
+        # AI-generated code often defines __init__(self, dep1, dep2, ...) requiring
+        # injected dependencies, but calling code does ClassName() with no args.
+        # Making params optional prevents "missing N required positional arguments".
+        def _fix_init_params(c: str) -> str:
+            def _fix(m):
+                params_raw = m.group(1)
+                tokens, current, depth = [], "", 0
+                for ch in params_raw:
+                    if ch in "([{": depth += 1
+                    elif ch in ")]}": depth -= 1
+                    if ch == "," and depth == 0:
+                        tokens.append(current); current = ""
+                    else:
+                        current += ch
+                if current.strip():
+                    tokens.append(current)
+                new_tokens = []
+                for tok in tokens:
+                    s = tok.strip()
+                    if not s or s == "self" or s.startswith("*") or "=" in s:
+                        new_tokens.append(tok); continue
+                    name = s.split(":")[0].strip() if ":" in s else s
+                    indent = tok[: len(tok) - len(tok.lstrip())]
+                    new_tokens.append(f"{indent}{name}=None")
+                return f"def __init__({', '.join(new_tokens)}):"
+            return re.sub(r"def __init__\(([^)]*)\):", _fix, c, flags=re.DOTALL)
+        code = _fix_init_params(code)
+
         code = cls._fix_bad_imports(code)
 
         # Ensure known required exports exist in their respective modules
