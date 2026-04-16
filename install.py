@@ -1607,56 +1607,95 @@ class Installer:
                 if not missing:
                     continue
 
-                # Append stubs for missing names.
-                # CamelCase names are classes — never stub them with a function,
-                # as that shadows the real class. Regenerate the module instead.
+                # CamelCase missing names are class references.
+                # Strategy:
+                #   • If the target file ALREADY HAS classes → add aliases only.
+                #     Regenerating causes churn: different importers need different
+                #     names for the same module, so each regeneration breaks the
+                #     previous one (the loop the user reported).
+                #   • If the target file has NO classes at all → regenerate once,
+                #     but first collect every class name required by EVERY importer
+                #     so the regeneration satisfies all callers in one shot.
                 camel = [n for n in missing if n[0].isupper() and not n.endswith("Error") and not n.endswith("Exception")]
                 if camel:
-                    self.log.warn(f"  {target_path} — missing class(es) {camel}, regenerating module")
-                    registry_entry = next((m for m in REGISTRY if m["path"] == target_path), None)
-                    if registry_entry:
-                        # Augment desc to tell Claude exactly which class names are required
-                        augmented = dict(registry_entry)
-                        augmented["desc"] = (
-                            registry_entry["desc"] +
-                            f" MUST export these class names exactly: {', '.join(camel)}."
-                        )
-                        target.unlink(missing_ok=True)
-                        self._install_module(augmented)
-                        # Post-verify: if Claude still used wrong names, add aliases
-                        new_defs = defined_names(target) if target.exists() else set()
-                        still_missing = [n for n in camel if n not in new_defs]
-                        if still_missing and target.exists():
-                            self.log.warn(f"  {target_path} — regenerated but still missing {still_missing}, injecting aliases")
-                            regen_src = target.read_text(encoding="utf-8", errors="replace")
-                            existing_classes = re.findall(r'^class (\w+)', regen_src, re.MULTILINE)
-                            aliases = []
-                            for _name in still_missing:
-                                if existing_classes:
-                                    import difflib as _dl
-                                    _match = _dl.get_close_matches(_name, existing_classes, n=1, cutoff=0.3)
-                                    alias_target = _match[0] if _match else existing_classes[0]
-                                    aliases.append(f"\n{_name} = {alias_target}  # auto-alias")
-                                else:
-                                    # No class found at all — inject a stub class
-                                    aliases.append(f"\nclass {_name}:\n    pass\n")
-                            if aliases:
-                                target.write_text(regen_src + "\n" + "".join(aliases), encoding="utf-8")
-                                self.log.ok(f"  {target_path} — aliases injected: {still_missing}")
-                    else:
-                        # Not in registry — add aliases pointing to closest existing name
-                        src = target.read_text(encoding="utf-8", errors="replace")
-                        existing_classes = re.findall(r'^class (\w+)', src, re.MULTILINE)
+                    import difflib as _dl
+                    cur_src = ""
+                    try:
+                        cur_src = target.read_text(encoding="utf-8", errors="replace")
+                    except Exception:
+                        pass
+                    existing_classes = re.findall(r'^class (\w+)', cur_src, re.MULTILINE)
+
+                    if existing_classes:
+                        # ── Alias-only path (fast, no API, no churn) ────────────
+                        cur_defs = defined_names(target)
                         aliases = []
-                        for name in camel:
-                            if existing_classes:
-                                import difflib
-                                match = difflib.get_close_matches(name, existing_classes, n=1, cutoff=0.3)
-                                alias_target = match[0] if match else existing_classes[0]
-                                aliases.append(f"\n{name} = {alias_target}  # auto-alias")
+                        for _n in camel:
+                            if _n not in cur_defs:
+                                _m = _dl.get_close_matches(_n, existing_classes, n=1, cutoff=0.3)
+                                aliases.append(
+                                    f"\n{_n} = {_m[0] if _m else existing_classes[0]}  # auto-alias"
+                                )
                         if aliases:
-                            target.write_text(src + "\n" + "".join(aliases), encoding="utf-8")
-                            self.log.ok(f"  {target_path} — added aliases: {camel}")
+                            target.write_text(cur_src + "\n" + "".join(aliases), encoding="utf-8")
+                            self.log.ok(f"  {target_path} — aliased: {camel}")
+                    else:
+                        # ── Regeneration path (file has no classes at all) ───────
+                        # Collect every class name required by EVERY importer of
+                        # this module so we regenerate exactly once.
+                        all_camel: set = set(camel)
+                        for _sf in scan_files:
+                            if not _sf.exists():
+                                continue
+                            try:
+                                _s = _sf.read_text(encoding="utf-8", errors="replace")
+                            except Exception:
+                                continue
+                            _flat2 = re.sub(
+                                r'from ([\w.]+) import \(([^)]+)\)',
+                                lambda _mm: f"from {_mm.group(1)} import {', '.join(_mm.group(2).split())}",
+                                _s, flags=re.DOTALL,
+                            )
+                            for _om in re.finditer(
+                                rf'^from {re.escape(mod_dotted)} import ([\w ,]+)',
+                                _flat2, re.MULTILINE,
+                            ):
+                                for _n in [x.strip().split(" as ")[0].strip()
+                                           for x in _om.group(1).split(",")]:
+                                    if (_n and _n[0].isupper()
+                                            and not _n.endswith(("Error", "Exception"))):
+                                        all_camel.add(_n)
+
+                        registry_entry = next((rm for rm in REGISTRY if rm["path"] == target_path), None)
+                        if registry_entry:
+                            augmented = dict(registry_entry)
+                            augmented["desc"] = (
+                                registry_entry["desc"]
+                                + f" MUST export these class names exactly: {', '.join(sorted(all_camel))}."
+                            )
+                            self.log.warn(
+                                f"  {target_path} — no classes, regenerating with full set {sorted(all_camel)}"
+                            )
+                            target.unlink(missing_ok=True)
+                            self._install_module(augmented)
+                            # Post-verify: alias anything still missing after regen
+                            if target.exists():
+                                _rs = target.read_text(encoding="utf-8", errors="replace")
+                                _nc = re.findall(r'^class (\w+)', _rs, re.MULTILINE)
+                                _nd = defined_names(target)
+                                _still = [n for n in all_camel if n not in _nd]
+                                if _still and _nc:
+                                    _pa = []
+                                    for _n in _still:
+                                        _m2 = _dl.get_close_matches(_n, _nc, n=1, cutoff=0.3)
+                                        _pa.append(f"\n{_n} = {_m2[0] if _m2 else _nc[0]}  # auto-alias")
+                                    target.write_text(_rs + "\n" + "".join(_pa), encoding="utf-8")
+                                    self.log.ok(f"  {target_path} — post-regen aliases: {_still}")
+                        else:
+                            # Not in registry, no classes — inject stub classes
+                            stubs = "".join(f"\nclass {_n}:\n    pass\n" for _n in camel)
+                            target.write_text(cur_src + stubs, encoding="utf-8")
+                            self.log.ok(f"  {target_path} — stub classes: {camel}")
                     continue
 
                 additions = []
