@@ -1179,7 +1179,14 @@ class Installer:
                 content = out.read_text(encoding="cp1252", errors="replace")
             except Exception:
                 content = ""
-            is_stub = "Module not yet installed:" in content or "STUB (install failed)" in content
+            is_stub = (
+                "Module not yet installed:" in content
+                or "STUB (install failed)" in content
+                or bool(re.search(
+                    r'def run\(self.*?\).*?raise NotImplementedError',
+                    content, re.DOTALL
+                ))
+            )
             # Apply compatibility patches to existing files
             if not is_stub and out.suffix == ".py":
                 patched = self.claude._patch_code(content, path_hint=mod["path"])
