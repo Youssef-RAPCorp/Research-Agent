@@ -305,47 +305,62 @@ def _fix_old_getattr_cycles(scan_files: list) -> int:
     return fixed
 
 
+def _can_reach(graph_flat: dict, start: str, target: str) -> bool:
+    """BFS: can we reach 'target' from 'start' following imports?"""
+    visited: set = set()
+    queue = [start]
+    while queue:
+        node = queue.pop()
+        if node == target:
+            return True
+        if node in visited:
+            continue
+        visited.add(node)
+        queue.extend(graph_flat.get(node, ()))
+    return False
+
+
 def phase1b_break_circular_imports(scan_files: list) -> int:
     """
-    Build an intra-project import graph, find A↔B circular pairs, then break
-    the cycle in the alphabetically-first module by replacing the circular
-    `from X import Y` with a try/except that installs a placeholder class on
-    ImportError:
+    Build an intra-project import graph, find ALL cycles (A↔B direct pairs
+    AND longer A→B→C→A chains) via reachability, then break each back-edge
+    by wrapping the circular import in try/except + placeholder class.
 
         try:
             from memory.semantic import SemanticMemory
         except ImportError:          # circular import guard
             SemanticMemory = type('SemanticMemory', (), {})
 
-    This works for bare-name lookups inside class bodies (type annotations,
-    default-value expressions) which __getattr__ cannot intercept.
+    For an n-node cycle every edge (M imports N) where N can transitively
+    reach M is a back-edge and gets patched.
     """
     # Pre-step: upgrade any old __getattr__ blocks left by a previous repair run
     fixed = _fix_old_getattr_cycles(scan_files)
 
     module_imports = _build_import_graph(scan_files)
 
-    seen_pairs: set = set()
+    # Flat graph {mod: set(mods it imports)} for reachability checks
+    graph_flat = {mod: set(imp.keys()) for mod, imp in module_imports.items()}
+
+    seen_edges: set = set()
     circular_fixes: list = []
 
     for mod_a, imports_a in module_imports.items():
-        for mod_b in list(imports_a):
-            if mod_b not in module_imports:
+        for source_mod, names in imports_a.items():
+            if source_mod not in module_imports:
                 continue
-            if mod_a not in module_imports[mod_b]:
+            # Back-edge: can source_mod (transitively) reach mod_a?
+            if not _can_reach(graph_flat, source_mod, mod_a):
                 continue
-            pair = tuple(sorted([mod_a, mod_b]))
-            if pair in seen_pairs:
+            edge = (mod_a, source_mod)
+            if edge in seen_edges:
                 continue
-            seen_pairs.add(pair)
-            patch_mod  = pair[0]   # alphabetically first — patch this one
-            source_mod = pair[1]
-            lazy_names = module_imports[patch_mod].get(source_mod, [])
-            if lazy_names:
+            seen_edges.add(edge)
+            if names:
                 circular_fixes.append((
-                    Path(patch_mod.replace(".", "/") + ".py"),
+                    Path(mod_a.replace(".", "/") + ".py"),
                     source_mod,
-                    lazy_names,
+                    names,
                 ))
 
     new_cycle_fixed = 0
