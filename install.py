@@ -1859,6 +1859,101 @@ class Installer:
         elif not missing_project:
             self.log.ok("  All project module files present")
 
+    # ── Break circular imports ────────────────────────────────────────────────
+
+    def _break_import_cycles(self):
+        """
+        Build an intra-project import graph, find A↔B circular pairs, and break
+        the cycle in the alphabetically-first module using PEP 562 __getattr__:
+        remove the circular import and lazily load on first attribute access.
+        """
+        self.log.phase("─── Step 5d: Breaking circular imports")
+
+        py_files = [Path(m["path"]) for m in REGISTRY if m["path"].endswith(".py")]
+        scan_files = py_files + [Path("main.py")]
+
+        module_imports: dict = {}
+        for pf in scan_files:
+            if not pf.exists() or pf.name == "__init__.py":
+                continue
+            pkg = pf.parent.name
+            if pkg not in self.PROJECT_PKGS:
+                continue
+            module = f"{pkg}.{pf.stem}"
+            try:
+                src = pf.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            flat = re.sub(
+                r"from ([\w.]+) import \(([^)]+)\)",
+                lambda mm: f"from {mm.group(1)} import {', '.join(mm.group(2).split())}",
+                src, flags=re.DOTALL,
+            )
+            imports: dict = {}
+            for m in re.finditer(r"^from ([\w.]+) import ([\w ,]+)", flat, re.MULTILINE):
+                mod = m.group(1)
+                if mod.split(".")[0] not in self.PROJECT_PKGS:
+                    continue
+                names = [n.strip().split(" as ")[0].strip() for n in m.group(2).split(",")]
+                names = [n for n in names if n and not n.startswith("_")]
+                if names:
+                    imports.setdefault(mod, set()).update(names)
+            module_imports[module] = {k: list(v) for k, v in imports.items()}
+
+        seen: set = set()
+        fixed = 0
+        for mod_a, imports_a in module_imports.items():
+            for mod_b in list(imports_a):
+                if mod_b not in module_imports:
+                    continue
+                if mod_a not in module_imports[mod_b]:
+                    continue
+                pair = tuple(sorted([mod_a, mod_b]))
+                if pair in seen:
+                    continue
+                seen.add(pair)
+                patch_mod  = pair[0]
+                source_mod = pair[1]
+                lazy_names = module_imports[patch_mod].get(source_mod, [])
+                if not lazy_names:
+                    continue
+                pf = Path(patch_mod.replace(".", "/") + ".py")
+                if not pf.exists():
+                    continue
+                try:
+                    src = pf.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    continue
+                guard = f"_CIRCULAR_{source_mod.replace('.', '_').upper()}"
+                if guard in src:
+                    continue
+                new_src = src
+                for name in lazy_names:
+                    new_src = re.sub(
+                        rf"^from {re.escape(source_mod)} import[^\n]*\b{re.escape(name)}\b[^\n]*\n",
+                        "", new_src, flags=re.MULTILINE,
+                    )
+                getattr_block = (
+                    f"\n# Lazy imports — breaks circular dependency with {source_mod}\n"
+                    f"{guard} = {repr(dict((n, source_mod) for n in lazy_names))}\n\n"
+                    f"def __getattr__(name):\n"
+                    f"    if name in {guard}:\n"
+                    f"        import importlib\n"
+                    f"        _mod = importlib.import_module({guard}[name])\n"
+                    f"        _obj = getattr(_mod, name)\n"
+                    f"        globals()[name] = _obj\n"
+                    f"        return _obj\n"
+                    f"    raise AttributeError(f\"module {{__name__!r}} has no attribute {{name!r}}\")\n"
+                )
+                pf.write_text(new_src + getattr_block, encoding="utf-8")
+                self.log.ok(f"  {pf} — lazy: {lazy_names} ← {source_mod}")
+                fixed += 1
+
+        if fixed:
+            self.log.ok(f"  {fixed} circular import(s) broken")
+        else:
+            self.log.ok("  No circular imports detected")
+
     # ── Clear pycache ────────────────────────────────────────────────────
 
     def _clear_pycache(self):
@@ -1950,6 +2045,7 @@ class Installer:
         self._run_phases()
         self._auto_heal_imports()
         self._repair_missing_exports()   # second pass: catches cascading issues from auto-heal
+        self._break_import_cycles()      # break A↔B circular imports with __getattr__
         self._clear_pycache()
         self._venv_hint()
         self._os_notes()
