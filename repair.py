@@ -470,23 +470,39 @@ def _build_project_name_index(scan_files: list) -> dict:
     return index
 
 
+def _all_bare_camel_names(src: str) -> set:
+    """
+    Return all CamelCase identifiers used as bare tokens in src that are NOT:
+      - preceded by '.' (attribute access: obj.Name)
+      - inside string literals or comments
+
+    Strips triple- and single-quoted strings and # comments before scanning
+    so 'ClassName' inside a docstring isn't counted.
+    """
+    # Strip triple-quoted strings first
+    s = re.sub(r'""".*?"""', '""', src, flags=re.DOTALL)
+    s = re.sub(r"'''.*?'''", "''", s,  flags=re.DOTALL)
+    # Strip single-line strings
+    s = re.sub(r'"[^"\n\\]*(?:\\.[^"\n\\]*)*"', '""', s)
+    s = re.sub(r"'[^'\n\\]*(?:\\.[^'\n\\]*)*'", "''", s)
+    # Strip line comments
+    s = re.sub(r'#[^\n]*', '', s)
+    # Find bare CamelCase tokens (not preceded by '.' or word char)
+    return {m.group(1) for m in re.finditer(r'(?<![.\w])([A-Z][a-z]\w+|[A-Z]{2,}\w*)(?!\w)', s)}
+
+
 def phase1c_fix_undefined_annotations(scan_files: list) -> int:
     """
-    Scan every project file for CamelCase names that appear in class-body
-    variable annotations or __init__ parameter type hints but are not
-    imported/defined in that file.  For each such name found in the project
-    name index, inject a try/except ImportError guard after the last
-    top-level import line.
+    Scan every project file for CamelCase names that are used as bare tokens
+    (class-body annotations, method-body references, dict values, etc.) but
+    are not imported or defined in that file.  For each such name found in
+    the project name index, inject a try/except ImportError guard after the
+    last top-level import line.
 
-    This catches names removed by the old __getattr__ approach AND names
-    the AI simply forgot to import.
+    Covers both annotation-position uses (semantic: SemanticMemory) and
+    general method-body uses (ChatEvalPattern used as a dict value).
     """
     name_index = _build_project_name_index(scan_files)
-
-    # Matches bare CamelCase names in annotation position:
-    #   "    var: Name"  or  "    var: Name,"  or  "param: Name ="
-    # Also catches "param: Optional[Name]", "param: List[Name]", etc.
-    ANNOT = re.compile(r'[\s,(]\w[\w]*\s*:\s*(?:Optional\[|List\[|Dict\[[\w,\s]*,\s*)?([A-Z]\w+)', re.MULTILINE)
 
     fixed = 0
     for py_file in scan_files:
@@ -497,7 +513,7 @@ def phase1c_fix_undefined_annotations(scan_files: list) -> int:
         except Exception:
             continue
 
-        used_names = {m.group(1) for m in ANNOT.finditer(src)}
+        used_names = _all_bare_camel_names(src)
         if not used_names:
             continue
 
@@ -532,7 +548,7 @@ def phase1c_fix_undefined_annotations(scan_files: list) -> int:
 
         if added:
             py_file.write_text(new_src, encoding="utf-8")
-            print(f"  FIXED [undef annot ]  {py_file}  →  added imports: {added}")
+            print(f"  FIXED [undef name  ]  {py_file}  →  added imports: {added}")
             fixed += 1
     return fixed
 
