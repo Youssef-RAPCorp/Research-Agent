@@ -1159,6 +1159,21 @@ class Installer:
     # ── Install a single module ───────────────────────────────────────────
 
     @staticmethod
+    def _smoke_test_import(path: str) -> tuple[bool, str]:
+        """Try importing a module by file path. Returns (ok, error_message)."""
+        import importlib.util, traceback
+        try:
+            dotted = path.replace("\\", "/").replace("/", ".").removesuffix(".py")
+            spec = importlib.util.spec_from_file_location(dotted, path)
+            if spec is None:
+                return True, ""  # non-Python or unfindable — skip
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return True, ""
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+
+    @staticmethod
     def _check_syntax(code: str, path_hint: str) -> tuple[bool, str]:
         """Returns (is_valid, error_message). Non-Python files always pass."""
         if not path_hint.endswith(".py"):
@@ -1196,9 +1211,14 @@ class Installer:
                     self.log.ok(f"  {mod['name']} — patched compatibility fixes")
             valid_syntax, err_msg = self._check_syntax(content, str(out))
             if not is_stub and valid_syntax:
-                self.skipped += 1
-                self.log.muted(f"  {mod['name']} — already installed, skipping")
-                return "skipped"
+                # Quick import smoke-test to catch circular imports in existing files
+                import_ok, import_err = self._smoke_test_import(mod["path"])
+                if import_ok:
+                    self.skipped += 1
+                    self.log.muted(f"  {mod['name']} — already installed, skipping")
+                    return "skipped"
+                else:
+                    self.log.warn(f"  {mod['name']} — import error in existing file ({import_err}), regenerating")
             elif not valid_syntax:
                 self.log.warn(f"  {mod['name']} — syntax error in existing file ({err_msg}), regenerating")
 
