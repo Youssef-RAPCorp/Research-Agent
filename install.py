@@ -535,6 +535,14 @@ Rules:
         code = re.sub(r'from \.\.([\w])', r'from \1', code)
         code = re.sub(r'^from \.\. import .+\n?', '', code, flags=re.MULTILINE)
 
+        # orchestrator.py: fix bare super().__init__() → pass required BaseAgent args
+        if ph.endswith("agents/orchestrator.py"):
+            code = re.sub(
+                r'super\(\)\.__init__\(\)',
+                'super().__init__(agent_id="orchestrator", name="PhysicsOrchestrator")',
+                code
+            )
+
         # Un-guard any config.* / utils.* imports that were previously and
         # incorrectly placed under TYPE_CHECKING — they must run at runtime.
         def _ungaurd_config(m: re.Match) -> str:
