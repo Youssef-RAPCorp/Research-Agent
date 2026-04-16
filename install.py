@@ -647,6 +647,48 @@ Rules:
 
         code = cls._fix_bad_imports(code)
 
+        # Inject missing imports for known module-prefix usages.
+        # AI-generated code often writes retry.Retry(...) or firestore.Client()
+        # without the corresponding import, causing NameError at class-body
+        # execution time (not caught by syntax checks).
+        _AUTO_IMPORTS = [
+            (r'\bretry\.',                  'from google.api_core import retry'),
+            (r'\bGoogleAPIError\b',         'from google.api_core.exceptions import GoogleAPIError'),
+            (r'\bgoogle_exceptions\.',      'from google.api_core import exceptions as google_exceptions'),
+            (r'\bfirestore\.',              'from google.cloud import firestore'),
+            (r'\bfirebase_admin\.',         'import firebase_admin'),
+            (r'\bstorage\.Client\b',        'from google.cloud import storage'),
+            (r'\btenacity\.',               'import tenacity'),
+            (r'\basyncio\.',                'import asyncio'),
+            (r'\blogging\.',                'import logging'),
+            (r'\bdatetime\.',               'import datetime'),
+            (r'\bjson\.',                   'import json'),
+            (r'\bpathlib\.',                'from pathlib import Path'),
+            (r'\baiohttp\.',                'import aiohttp'),
+            (r'\bhttpx\.',                  'import httpx'),
+            (r'\bnumpy\b|\bnp\.',           'import numpy as np'),
+            (r'\bpd\.',                     'import pandas as pd'),
+        ]
+        for _pat, _imp in _AUTO_IMPORTS:
+            _guard = _imp.split()[-1].split('.')[-1]  # the bound name after import
+            # Skip if usage pattern not found, or if the name is already imported
+            if not re.search(_pat, code):
+                continue
+            if re.search(rf'\b{re.escape(_guard)}\b', code.split('\n', 30)[0] if len(code) > 0 else ''):
+                continue  # already in first 30 lines
+            if _imp in code:
+                continue
+            # Check if the guard name appears in any import line already
+            if re.search(rf'^(?:import|from).*\b{re.escape(_guard)}\b', code, re.MULTILINE):
+                continue
+            # Inject after the last existing import line
+            _last = list(re.finditer(r'^(?:import |from )\S+', code, re.MULTILINE))
+            if _last:
+                _pos = _last[-1].end()
+                code = code[:_pos] + f"\n{_imp}" + code[_pos:]
+            else:
+                code = _imp + "\n" + code
+
         # Ensure known required exports exist in their respective modules
         REQUIRED_EXPORTS = {
             "config/settings.py": [

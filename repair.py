@@ -254,9 +254,63 @@ def phase2_fix_imports(scan_files: list) -> int:
     return fixed
 
 
-# ── Phase 3: Make __init__ params optional ────────────────────────────────────
+# ── Phase 3: Inject missing auto-imports ─────────────────────────────────────
 
-def phase3_fix_init_params(scan_files: list) -> int:
+# Known module-prefix usages that require a specific import line.
+# Format: (regex_that_detects_usage, import_line_to_inject, bound_name_guard)
+_AUTO_IMPORTS = [
+    (r'\bretry\.',             'from google.api_core import retry',                         'retry'),
+    (r'\bGoogleAPIError\b',    'from google.api_core.exceptions import GoogleAPIError',     'GoogleAPIError'),
+    (r'\bgoogle_exceptions\.',  'from google.api_core import exceptions as google_exceptions', 'google_exceptions'),
+    (r'\bfirestore\.',         'from google.cloud import firestore',                        'firestore'),
+    (r'\bfirebase_admin\.',    'import firebase_admin',                                     'firebase_admin'),
+    (r'\bstorage\.Client\b',   'from google.cloud import storage',                         'storage'),
+    (r'\btenacity\.',          'import tenacity',                                           'tenacity'),
+    (r'\baiohttp\.',           'import aiohttp',                                            'aiohttp'),
+    (r'\bhttpx\.',             'import httpx',                                              'httpx'),
+    (r'\bnp\.',                'import numpy as np',                                        'np'),
+    (r'\bpd\.',                'import pandas as pd',                                       'pd'),
+]
+
+
+def phase3_inject_missing_imports(scan_files: list) -> int:
+    """Inject missing imports for known module-prefix usages (e.g. retry.Retry
+    without 'from google.api_core import retry')."""
+    fixed = 0
+    for py_file in scan_files:
+        if py_file.name in ("repair.py", "install.py"):
+            continue
+        try:
+            src = py_file.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+
+        new_src = src
+        for pat, imp, guard in _AUTO_IMPORTS:
+            if not re.search(pat, new_src):
+                continue
+            if re.search(rf'^(?:import|from).*\b{re.escape(guard)}\b', new_src, re.MULTILINE):
+                continue  # already imported
+            if imp in new_src:
+                continue
+            last = list(re.finditer(r'^(?:import |from )\S+', new_src, re.MULTILINE))
+            if last:
+                pos = last[-1].end()
+                new_src = new_src[:pos] + f"\n{imp}" + new_src[pos:]
+            else:
+                new_src = imp + "\n" + new_src
+
+        if new_src != src:
+            py_file.write_text(new_src, encoding="utf-8")
+            print(f"  FIXED [auto-import]  {py_file}")
+            fixed += 1
+
+    return fixed
+
+
+# ── Phase 4: Make __init__ params optional ────────────────────────────────────
+
+def phase4_fix_init_params(scan_files: list) -> int:
     fixed = 0
     for py_file in scan_files:
         if py_file.name in ("repair.py", "install.py"):
@@ -290,11 +344,15 @@ def run():
     print("  " + "─" * 52)
     total_fixed += phase2_fix_imports(scan_files)
 
-    print("\n  Phase 3: Making __init__ params optional (default=None)")
+    print("\n  Phase 3: Injecting missing auto-imports (retry, firestore, etc.)")
     print("  " + "─" * 52)
-    total_fixed += phase3_fix_init_params(scan_files)
+    total_fixed += phase3_inject_missing_imports(scan_files)
 
-    # Second pass of Phase 2 — Phase 1/3 may expose new import mismatches
+    print("\n  Phase 4: Making __init__ params optional (default=None)")
+    print("  " + "─" * 52)
+    total_fixed += phase4_fix_init_params(scan_files)
+
+    # Second pass of Phase 2 — earlier phases may expose new import mismatches
     print("\n  Phase 2 (second pass)")
     print("  " + "─" * 52)
     second = phase2_fix_imports(scan_files)
