@@ -298,6 +298,14 @@ def phase3_inject_missing_imports(scan_files: list) -> int:
             else:
                 new_src = imp + "\n" + new_src
 
+        # Strip @retry.X() module-qualified decorators.
+        # google.api_core.retry and tenacity both bind to the name 'retry';
+        # even after import injection the wrong one may win, causing NameError
+        # at class-body execution time. Firebase/gRPC methods work without them.
+        stripped = re.sub(r'^[ \t]*@retry\.\w+\([^)\n]*\)\n', '', new_src, flags=re.MULTILINE)
+        if stripped != new_src:
+            new_src = stripped
+
         if new_src != src:
             py_file.write_text(new_src, encoding="utf-8")
             print(f"  FIXED [auto-import]  {py_file}")

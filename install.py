@@ -684,6 +684,12 @@ Rules:
             else:
                 code = _imp + "\n" + code
 
+        # Strip @retry.X() module-qualified decorators.
+        # google.api_core.retry and tenacity both bind to the name 'retry',
+        # so even after import injection the wrong one may win, causing NameError
+        # at class-body execution time.  Firebase/gRPC methods work without them.
+        code = re.sub(r'^[ \t]*@retry\.\w+\([^)\n]*\)\n', '', code, flags=re.MULTILINE)
+
         # Ensure known required exports exist in their respective modules
         REQUIRED_EXPORTS = {
             "config/settings.py": [
