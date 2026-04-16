@@ -433,6 +433,11 @@ Rules:
         # sympy.diffgeom: AI-hallucinated names → correct equivalents
         ("BaseOneForm", "OneForm"),
 
+        # qdrant_client: AI-hallucinated model names → correct equivalents
+        ("from qdrant_client.http.models import SearchResult",
+         "from qdrant_client.http.models import ScoredPoint"),
+        ("qdrant_client.http.models.SearchResult", "qdrant_client.http.models.ScoredPoint"),
+
         # Relative imports that escape the top-level package → absolute imports
         # e.g. "from ..config.settings import X" → "from config.settings import X"
         ("from ..config.", "from config."),
