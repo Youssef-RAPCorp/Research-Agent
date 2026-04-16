@@ -535,6 +535,16 @@ Rules:
         code = re.sub(r'from \.\.([\w])', r'from \1', code)
         code = re.sub(r'^from \.\. import .+\n?', '', code, flags=re.MULTILINE)
 
+        # Un-guard any config.* / utils.* imports that were previously and
+        # incorrectly placed under TYPE_CHECKING — they must run at runtime.
+        def _ungaurd_config(m: re.Match) -> str:
+            return m.group(1)  # strip the TYPE_CHECKING wrapper, keep the import
+        code = re.sub(
+            r'if TYPE_CHECKING:\n    (from (?:config|utils)\..*)',
+            _ungaurd_config,
+            code, flags=re.MULTILINE
+        )
+
         # Break circular imports: cross-package project imports that cause
         # "partially initialized module" errors get moved under TYPE_CHECKING
         # so they never execute at runtime.
