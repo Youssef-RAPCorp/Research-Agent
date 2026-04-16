@@ -526,6 +526,8 @@ Rules:
     @classmethod
     def _patch_code(cls, code: str, path_hint: str = "") -> str:
         """Apply known compatibility fixes to generated code."""
+        ph = path_hint.replace("\\", "/")
+
         for old, new in cls._PATCHES:
             code = code.replace(old, new)
 
@@ -556,7 +558,6 @@ Rules:
         # Break circular imports: cross-package project imports that cause
         # "partially initialized module" errors get moved under TYPE_CHECKING
         # so they never execute at runtime.
-        ph = path_hint.replace("\\", "/")
         this_pkg = ph.split("/")[0] if "/" in ph else ""
         PROJECT_PKGS = (
             "agents","config","knowledge","memory",
@@ -617,7 +618,6 @@ Rules:
                 ("handle_error", "def handle_error(e: Exception) -> None:\n    import logging\n    logging.getLogger(__name__).error(str(e), exc_info=True)"),
             ],
         }
-        ph = path_hint.replace("\\", "/")
         for file_path, exports in REQUIRED_EXPORTS.items():
             if ph.endswith(file_path):
                 for fn_name, fn_body in exports:
