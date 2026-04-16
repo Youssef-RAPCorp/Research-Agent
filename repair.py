@@ -121,6 +121,13 @@ def make_init_optional(code: str) -> tuple:
             indent = tok[: len(tok) - len(tok.lstrip())]
             new_tokens.append(f"{indent}{name}=None")
 
+        # Add **kwargs if not already present — absorbs unexpected keyword args
+        # from callers so we never get 'unexpected keyword argument' TypeErrors.
+        has_kwargs = any(t.strip().startswith('**') for t in new_tokens)
+        if not has_kwargs:
+            new_tokens.append('**kwargs')
+            changed_params.append('**kwargs')
+
         return f"def __init__({', '.join(new_tokens)}):"
 
     new_code = re.sub(r"def __init__\(([^)]*)\):", _fix, code, flags=re.DOTALL)
