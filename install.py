@@ -545,14 +545,17 @@ Rules:
             "thinking","physics","discovery","interface","utils",
         )
 
+        # config.* is foundational — always needed at runtime, never circular
+        ALWAYS_ALLOW = {"config", "utils"}
+
         def _guard_cross_pkg(m: re.Match) -> str:
             stmt = m.group(0)
             src_pkg = re.match(r'from ([\w]+)\.', stmt)
             if not src_pkg:
                 return stmt
             pkg = src_pkg.group(1)
-            if pkg not in PROJECT_PKGS or pkg == this_pkg:
-                return stmt  # same package or stdlib/third-party — leave alone
+            if pkg not in PROJECT_PKGS or pkg == this_pkg or pkg in ALWAYS_ALLOW:
+                return stmt  # foundational, same package, or third-party — leave alone
             # Guard under TYPE_CHECKING to break the runtime circular chain
             return (
                 "from typing import TYPE_CHECKING  # noqa\n"
