@@ -530,6 +530,20 @@ Rules:
         for old, new in cls._PATCHES:
             code = code.replace(old, new)
 
+        # Remove stub functions/classes that shadow real class definitions.
+        # _repair_missing_exports used to append these due to a name-parsing bug
+        # (trailing colon on class names).  Pattern:
+        #   def ClassName(*args, **kwargs):\n    raise NotImplementedError(...)
+        # that appears anywhere AFTER a real "class ClassName" definition.
+        real_classes = set(re.findall(r'^class (\w+)', code, re.MULTILINE))
+        if real_classes:
+            code = re.sub(
+                r'\n+def (' + '|'.join(re.escape(c) for c in real_classes) +
+                r')\(\*args,\s*\*\*kwargs\):\s*\n\s+raise NotImplementedError\([^\)]*\)\n?',
+                '',
+                code
+            )
+
         # Fix relative imports that escape the top-level package.
         # "from ..config.settings import X"  →  "from config.settings import X"
         # "from .. import X"  →  removed (no valid target at top level)
