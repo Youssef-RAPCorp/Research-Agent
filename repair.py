@@ -253,30 +253,31 @@ def _fix_old_getattr_cycles(scan_files: list) -> int:
             continue
 
         new_src = src
-        for gm in list(GUARD_LINE.finditer(src)):
+        # Use a while loop so every position is relative to the CURRENT new_src,
+        # not the original src (avoids off-by-N errors when multiple blocks exist).
+        while True:
+            gm = GUARD_LINE.search(new_src)
+            if not gm:
+                break
             dict_str = gm.group(1)
             # Parse {'Name1': 'pkg.mod', 'Name2': 'pkg.mod'}
             entries = re.findall(r"['\"](\w+)['\"]:\s*['\"]([^'\"]+)['\"]", dict_str)
             if not entries:
-                continue
+                break
             names      = [e[0] for e in entries]
             source_mod = entries[0][1]   # all values share the same module
 
-            # ── Locate block boundaries ──────────────────────────────────
-            # Block start: look for a "# ... circular dependency ..." comment
-            # line immediately before the _CIRCULAR_ line, else the dict line.
+            # ── Locate block boundaries in new_src ───────────────────────
             block_start = gm.start()
             preceding   = new_src[:block_start].rstrip('\n')
             nl           = preceding.rfind('\n')
             if nl != -1:
                 prev_line = preceding[nl + 1:]
                 if prev_line.lstrip().startswith('#') and 'circular' in prev_line.lower():
-                    # Include the newline that precedes the comment
                     block_start = nl if new_src[nl - 1:nl] == '\n' else nl
-            # Block end: the raise AttributeError line inside __getattr__
             getattr_pos = new_src.find('def __getattr__(name):', gm.end())
             if getattr_pos == -1:
-                continue
+                break
             em = RAISE_LINE.search(new_src, getattr_pos)
             block_end = em.end() if em else len(new_src)
 
@@ -290,7 +291,6 @@ def _fix_old_getattr_cycles(scan_files: list) -> int:
                 f"except ImportError:  # circular import guard — {source_mod}\n"
                 f"{placeholders}\n"
             )
-
             stripped    = new_src[:block_start] + new_src[block_end:]
             imp_matches = list(re.finditer(
                 r'^(?:from|import)\s+\S[^\n]*\n', stripped, re.MULTILINE,
@@ -348,7 +348,7 @@ def phase1b_break_circular_imports(scan_files: list) -> int:
                     lazy_names,
                 ))
 
-    fixed = 0
+    new_cycle_fixed = 0
     for py_file, from_module, lazy_names in circular_fixes:
         if not py_file.exists():
             continue
@@ -391,9 +391,135 @@ def phase1b_break_circular_imports(scan_files: list) -> int:
         if new_src != src:
             py_file.write_text(new_src, encoding="utf-8")
             print(f"  FIXED [circular   ]  {py_file}  →  guarded: {lazy_names} from {from_module}")
-            fixed += 1
+            new_cycle_fixed += 1
 
-    return fixed  # includes pre-step count from _fix_old_getattr_cycles
+    return fixed + new_cycle_fixed
+
+
+# ── Phase 1c: Fix undefined class-body annotation names ──────────────────────
+
+# Type names that are always available without import
+_BUILTIN_TYPES = {
+    'int', 'str', 'float', 'bool', 'bytes', 'list', 'dict', 'set', 'tuple',
+    'type', 'object', 'None', 'True', 'False', 'Self',
+    'Any', 'Optional', 'Union', 'List', 'Dict', 'Set', 'Tuple', 'Type',
+    'Callable', 'Awaitable', 'Coroutine', 'AsyncGenerator', 'Generator',
+    'Iterator', 'Iterable', 'Sequence', 'Mapping', 'MutableMapping',
+    'MutableSequence', 'ClassVar', 'Final', 'Literal', 'TypeVar', 'Protocol',
+    'dataclass', 'abstractmethod', 'property', 'staticmethod', 'classmethod',
+    'NotImplementedError', 'Exception', 'ValueError', 'TypeError',
+    'AttributeError', 'KeyError', 'RuntimeError', 'ImportError',
+    'asyncio', 'logging', 'datetime', 'Path',
+}
+
+
+def _names_defined_in_file(src: str) -> set:
+    """Return all names bound at module level (class/def/import/assignment)."""
+    names: set = set()
+    # class Foo / def foo
+    for m in re.finditer(r'^(?:class|def)\s+(\w+)', src, re.MULTILINE):
+        names.add(m.group(1))
+    # CamelCase = ... (assignments, incl. type(...) placeholder)
+    for m in re.finditer(r'^([A-Z]\w*)\s*=', src, re.MULTILINE):
+        names.add(m.group(1))
+    # from X import Foo, Bar [as baz] — top-level AND inside try/except
+    flat = re.sub(r'from ([\w.]+) import \(([^)]+)\)',
+                  lambda mm: f"from {mm.group(1)} import {', '.join(mm.group(2).split())}",
+                  src, flags=re.DOTALL)
+    for m in re.finditer(r'\bfrom\s+[\w.]+\s+import\s+([\w ,]+)', flat):
+        for n in m.group(1).split(','):
+            n = n.strip().split(' as ')[-1].strip()
+            if n:
+                names.add(n)
+    return names
+
+
+def _build_project_name_index(scan_files: list) -> dict:
+    """Return {CamelCaseName: 'pkg.module'} for every class/func defined in the project."""
+    index: dict = {}
+    for pf in scan_files:
+        if not pf.exists() or pf.name in ('repair.py', 'install.py', '__init__.py'):
+            continue
+        pkg = pf.parent.name
+        if pkg not in PROJECT_PKGS:
+            continue
+        module = f"{pkg}.{pf.stem}"
+        try:
+            src = pf.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for m in re.finditer(r'^(?:class|def)\s+([A-Z]\w+)\b', src, re.MULTILINE):
+            name = m.group(1)
+            if name not in index:
+                index[name] = module
+    return index
+
+
+def phase1c_fix_undefined_annotations(scan_files: list) -> int:
+    """
+    Scan every project file for CamelCase names that appear in class-body
+    variable annotations or __init__ parameter type hints but are not
+    imported/defined in that file.  For each such name found in the project
+    name index, inject a try/except ImportError guard after the last
+    top-level import line.
+
+    This catches names removed by the old __getattr__ approach AND names
+    the AI simply forgot to import.
+    """
+    name_index = _build_project_name_index(scan_files)
+
+    # Matches bare CamelCase names in annotation position:
+    #   "    var: Name"  or  "    var: Name,"  or  "param: Name ="
+    # Also catches "param: Optional[Name]", "param: List[Name]", etc.
+    ANNOT = re.compile(r'[\s,(]\w[\w]*\s*:\s*(?:Optional\[|List\[|Dict\[[\w,\s]*,\s*)?([A-Z]\w+)', re.MULTILINE)
+
+    fixed = 0
+    for py_file in scan_files:
+        if not py_file.exists() or py_file.name in ('repair.py', 'install.py', '__init__.py'):
+            continue
+        try:
+            src = py_file.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+
+        used_names = {m.group(1) for m in ANNOT.finditer(src)}
+        if not used_names:
+            continue
+
+        already   = _names_defined_in_file(src)
+        to_import = [n for n in used_names
+                     if n not in already
+                     and n not in _BUILTIN_TYPES
+                     and n in name_index]
+        if not to_import:
+            continue
+
+        new_src = src
+        added: list = []
+        for name in sorted(to_import):
+            # Re-check in current new_src (a previous iteration may have added it)
+            if name in _names_defined_in_file(new_src):
+                continue
+            source_mod = name_index[name]
+            placeholders = f"    {name} = type('{name}', (), {{}})"
+            try_block = (
+                f"\ntry:\n"
+                f"    from {source_mod} import {name}\n"
+                f"except ImportError:  # circular import guard — {source_mod}\n"
+                f"{placeholders}\n"
+            )
+            imp_matches = list(re.finditer(
+                r'^(?:from|import)\s+\S[^\n]*\n', new_src, re.MULTILINE,
+            ))
+            ins     = imp_matches[-1].end() if imp_matches else 0
+            new_src = new_src[:ins] + try_block + new_src[ins:]
+            added.append(name)
+
+        if added:
+            py_file.write_text(new_src, encoding="utf-8")
+            print(f"  FIXED [undef annot ]  {py_file}  →  added imports: {added}")
+            fixed += 1
+    return fixed
 
 
 # ── Phase 2: Fix missing imports ─────────────────────────────────────────────
@@ -562,6 +688,10 @@ def run():
     print("\n  Phase 1b: Breaking circular imports (try/except guard)")
     print("  " + "─" * 52)
     total_fixed += phase1b_break_circular_imports(scan_files)
+
+    print("\n  Phase 1c: Injecting imports for undefined class-body names")
+    print("  " + "─" * 52)
+    total_fixed += phase1c_fix_undefined_annotations(scan_files)
 
     print("\n  Phase 2: Fixing missing exports (aliases / stubs)")
     print("  " + "─" * 52)
