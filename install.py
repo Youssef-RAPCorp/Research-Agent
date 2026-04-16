@@ -573,14 +573,13 @@ Rules:
             cls_match = re.search(r'^class (\w+)', code, re.MULTILINE)
             cls_name = cls_match.group(1) if cls_match else Path(ph).stem
             agent_id = re.sub(r'(?<!^)(?=[A-Z])', '_', cls_name).lower().replace('__', '_').strip('_')
-            # Replace any super().__init__(...) that is missing agent_id or name
+            # Replace any super().__init__(...) that is missing agent_id or name.
+            # Always rewrite the full call to avoid positional-after-keyword syntax errors.
             def _fix_super_init(m: re.Match) -> str:
                 inner = m.group(1)
-                if 'agent_id' not in inner:
-                    inner = f'agent_id="{agent_id}", name="{cls_name}"' + (', ' + inner if inner.strip() else '')
-                elif 'name' not in inner:
-                    inner = inner.rstrip(', ') + f', name="{cls_name}"'
-                return f'super().__init__({inner})'
+                if 'agent_id' in inner and 'name' in inner:
+                    return m.group(0)  # already correct — leave untouched
+                return f'super().__init__(agent_id="{agent_id}", name="{cls_name}")'
             code = re.sub(r'super\(\)\.__init__\(([^)]*)\)', _fix_super_init, code)
 
         # Undo any broad TYPE_CHECKING guards that were incorrectly applied to
