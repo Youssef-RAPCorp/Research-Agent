@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cat \"/c/Users/Youssef/Documents/AppData/Local/Research-Agent/logs/\"*.log)"
+      "Bash(cat \"/c/Users/Youssef/Documents/AppData/Local/Research-Agent/logs/\"*.log)",
+      "Bash(python -m py_compile repair.py)"
     ]
   }
 }
