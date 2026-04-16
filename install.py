@@ -1569,8 +1569,28 @@ class Installer:
                     self.log.warn(f"  {target_path} — missing class(es) {camel}, regenerating module")
                     registry_entry = next((m for m in REGISTRY if m["path"] == target_path), None)
                     if registry_entry:
+                        # Augment desc to tell Claude exactly which class names are required
+                        augmented = dict(registry_entry)
+                        augmented["desc"] = (
+                            registry_entry["desc"] +
+                            f" MUST export these class names exactly: {', '.join(camel)}."
+                        )
                         target.unlink(missing_ok=True)
-                        self._install_module(registry_entry)
+                        self._install_module(augmented)
+                    else:
+                        # Not in registry — add aliases pointing to closest existing name
+                        src = target.read_text(encoding="utf-8", errors="replace")
+                        existing_classes = re.findall(r'^class (\w+)', src, re.MULTILINE)
+                        aliases = []
+                        for name in camel:
+                            if existing_classes:
+                                import difflib
+                                match = difflib.get_close_matches(name, existing_classes, n=1, cutoff=0.3)
+                                alias_target = match[0] if match else existing_classes[0]
+                                aliases.append(f"\n{name} = {alias_target}  # auto-alias")
+                        if aliases:
+                            target.write_text(src + "\n" + "".join(aliases), encoding="utf-8")
+                            self.log.ok(f"  {target_path} — added aliases: {camel}")
                     continue
 
                 additions = []
