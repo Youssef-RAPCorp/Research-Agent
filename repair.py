@@ -217,6 +217,80 @@ def _build_import_graph(scan_files: list) -> dict:
     return module_imports
 
 
+def _fix_old_getattr_cycles(scan_files: list) -> int:
+    """
+    Convert __getattr__ lazy-import blocks written by an older version of
+    repair.py into the correct try/except ImportError + placeholder guard.
+
+    Old pattern (appended to end of file, import line already removed):
+
+        # Lazy imports — breaks circular dependency with memory.semantic
+        _CIRCULAR_MEMORY_SEMANTIC = {'SemanticMemory': 'memory.semantic'}
+
+        def __getattr__(name):
+            if name in _CIRCULAR_MEMORY_SEMANTIC:
+                ...
+            raise AttributeError(...)
+
+    New pattern (injected after the last import line):
+
+        try:
+            from memory.semantic import SemanticMemory
+        except ImportError:  # circular import guard — memory.semantic
+            SemanticMemory = type('SemanticMemory', (), {})
+    """
+    OLD_BLOCK = re.compile(
+        r'\n# Lazy imports — breaks circular dependency with ([\w.]+)\n'
+        r'_CIRCULAR_\w+ = (\{[^}]+\})\n'
+        r'\n'
+        r'def __getattr__\(name\):\n'
+        r'    if name in \w+:\n'
+        r'        import importlib\n'
+        r'        _mod = importlib\.import_module\(\w+\[name\]\)\n'
+        r'        _obj = getattr\(_mod, name\)\n'
+        r'        globals\(\)\[name\] = _obj\n'
+        r'        return _obj\n'
+        r'    raise AttributeError\([^\n]+\)\n',
+    )
+    fixed = 0
+    for py_file in scan_files:
+        if not py_file.exists():
+            continue
+        try:
+            src = py_file.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        if "# Lazy imports — breaks circular dependency with" not in src:
+            continue
+        new_src = src
+        for bm in OLD_BLOCK.finditer(src):
+            source_mod = bm.group(1)
+            dict_str   = bm.group(2)
+            names = [m.group(1) for m in re.finditer(r"'(\w+)':", dict_str)]
+            if not names:
+                continue
+            placeholders = "\n".join(f"    {n} = type('{n}', (), {{}})" for n in names)
+            try_block = (
+                f"\ntry:\n"
+                f"    from {source_mod} import {', '.join(names)}\n"
+                f"except ImportError:  # circular import guard — {source_mod}\n"
+                f"{placeholders}\n"
+            )
+            # Remove old block from new_src
+            stripped = new_src.replace(bm.group(0), "", 1)
+            # Inject try/except after the last top-level import line
+            imp_matches = list(re.finditer(
+                r'^(?:from|import)\s+\S[^\n]*\n', stripped, re.MULTILINE,
+            ))
+            ins = imp_matches[-1].end() if imp_matches else 0
+            new_src = stripped[:ins] + try_block + stripped[ins:]
+        if new_src != src:
+            py_file.write_text(new_src, encoding="utf-8")
+            print(f"  FIXED [old->guard  ]  {py_file}  →  converted __getattr__ to try/except")
+            fixed += 1
+    return fixed
+
+
 def phase1b_break_circular_imports(scan_files: list) -> int:
     """
     Build an intra-project import graph, find A↔B circular pairs, then break
@@ -232,6 +306,9 @@ def phase1b_break_circular_imports(scan_files: list) -> int:
     This works for bare-name lookups inside class bodies (type annotations,
     default-value expressions) which __getattr__ cannot intercept.
     """
+    # Pre-step: upgrade any old __getattr__ blocks left by a previous repair run
+    fixed = _fix_old_getattr_cycles(scan_files)
+
     module_imports = _build_import_graph(scan_files)
 
     seen_pairs: set = set()
@@ -302,7 +379,7 @@ def phase1b_break_circular_imports(scan_files: list) -> int:
             print(f"  FIXED [circular   ]  {py_file}  →  guarded: {lazy_names} from {from_module}")
             fixed += 1
 
-    return fixed
+    return fixed  # includes pre-step count from _fix_old_getattr_cycles
 
 
 # ── Phase 2: Fix missing imports ─────────────────────────────────────────────
@@ -468,7 +545,7 @@ def run():
     print("  " + "─" * 52)
     total_fixed += phase1_remove_shadowing_stubs(scan_files)
 
-    print("\n  Phase 1b: Breaking circular imports (__getattr__ lazy loader)")
+    print("\n  Phase 1b: Breaking circular imports (try/except guard)")
     print("  " + "─" * 52)
     total_fixed += phase1b_break_circular_imports(scan_files)
 
