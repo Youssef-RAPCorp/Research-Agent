@@ -913,7 +913,8 @@ class PhysicsOrchestrator:
                 cls = getattr(mod, cls_name)
                 self._agents[name] = cls()
             except Exception as exc:
-                logger.warning(f"Could not load agent {name}: {exc}")
+                import traceback
+                logger.warning(f"Could not load agent {name}: {exc}\n{traceback.format_exc()}")
                 return None
         return self._agents[name]
 
