@@ -740,15 +740,26 @@ def _collect_abstract_methods(scan_files: list) -> dict:
             continue
         if 'abstractmethod' not in src:
             continue
-        # Walk class bodies looking for @abstractmethod
+        # Walk class bodies looking for @abstractmethod / @abc.abstractmethod
         for cls_m in re.finditer(r'^class (\w+)[^:]*:', src, re.MULTILINE):
             cls_name = cls_m.group(1)
-            after    = src[cls_m.end():]
-            # Collect lines until next top-level token
-            body_end = re.search(r'\n(?=[^\s\n])', after)
-            body     = after[:body_end.start()] if body_end else after
+            # Indentation-based body extraction (same as phase5)
+            body_lines_c: list = []
+            scan_pos = cls_m.end()
+            nl = src.find('\n', scan_pos)
+            scan_pos = (nl + 1) if nl != -1 else len(src)
+            while scan_pos < len(src):
+                nl = src.find('\n', scan_pos)
+                line_end = nl if nl != -1 else len(src)
+                line = src[scan_pos:line_end]
+                if not line.strip():
+                    body_lines_c.append(line); scan_pos = line_end + 1; continue
+                if line[:1] in (' ', '\t'):
+                    body_lines_c.append(line); scan_pos = line_end + 1; continue
+                break
+            body = '\n'.join(body_lines_c)
             for am in re.finditer(
-                r'@abstractmethod[^\n]*\n\s*(async\s+)?def (\w+)\s*\(',
+                r'@(?:\w+\.)*abstractmethod[^\n]*\n\s*(async\s+)?def (\w+)\s*\(',
                 body,
             ):
                 is_async   = bool(am.group(1))
