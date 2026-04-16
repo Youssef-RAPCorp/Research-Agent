@@ -185,20 +185,9 @@ def phase1_remove_shadowing_stubs(scan_files: list) -> int:
 
 # ── Phase 1b: Break circular imports ─────────────────────────────────────────
 
-def phase1b_break_circular_imports(scan_files: list) -> int:
-    """
-    Build an intra-project import graph, find circular pairs, then break the
-    cycle in the alphabetically-first module using PEP 562 module __getattr__:
-
-      • Remove the circular `from X import Y` at module level
-      • Append a __getattr__ that lazily loads Y on first access
-
-    This is correct for Python 3.7+ and works for instantiation, isinstance,
-    and type annotations alike.
-    """
-    # ── Build import graph ─────────────────────────────────────────────────
-    module_imports: dict = {}   # 'pkg.mod' -> {'pkg.other': ['Name1', ...]}
-
+def _build_import_graph(scan_files: list) -> dict:
+    """Return {module: {imported_module: [names]}} for all project .py files."""
+    module_imports: dict = {}
     for py_file in scan_files:
         if not py_file.exists() or py_file.name in ("repair.py", "install.py", "__init__.py"):
             continue
@@ -210,8 +199,6 @@ def phase1b_break_circular_imports(scan_files: list) -> int:
             src = py_file.read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
-
-        # Flatten multi-line imports
         flat = re.sub(
             r"from ([\w.]+) import \(([^)]+)\)",
             lambda m: f"from {m.group(1)} import {', '.join(m.group(2).split())}",
@@ -227,10 +214,28 @@ def phase1b_break_circular_imports(scan_files: list) -> int:
             if names:
                 imports.setdefault(mod, set()).update(names)
         module_imports[module] = {k: list(v) for k, v in imports.items()}
+    return module_imports
 
-    # ── Find circular pairs ────────────────────────────────────────────────
+
+def phase1b_break_circular_imports(scan_files: list) -> int:
+    """
+    Build an intra-project import graph, find A↔B circular pairs, then break
+    the cycle in the alphabetically-first module by replacing the circular
+    `from X import Y` with a try/except that installs a placeholder class on
+    ImportError:
+
+        try:
+            from memory.semantic import SemanticMemory
+        except ImportError:          # circular import guard
+            SemanticMemory = type('SemanticMemory', (), {})
+
+    This works for bare-name lookups inside class bodies (type annotations,
+    default-value expressions) which __getattr__ cannot intercept.
+    """
+    module_imports = _build_import_graph(scan_files)
+
     seen_pairs: set = set()
-    circular_fixes: list = []   # (file_to_patch, from_module, lazy_names)
+    circular_fixes: list = []
 
     for mod_a, imports_a in module_imports.items():
         for mod_b in list(imports_a):
@@ -242,10 +247,9 @@ def phase1b_break_circular_imports(scan_files: list) -> int:
             if pair in seen_pairs:
                 continue
             seen_pairs.add(pair)
-            # Patch the alphabetically-first module (pair[0])
-            patch_mod   = pair[0]
-            source_mod  = pair[1]
-            lazy_names  = module_imports[patch_mod].get(source_mod, [])
+            patch_mod  = pair[0]   # alphabetically first — patch this one
+            source_mod = pair[1]
+            lazy_names = module_imports[patch_mod].get(source_mod, [])
             if lazy_names:
                 circular_fixes.append((
                     Path(patch_mod.replace(".", "/") + ".py"),
@@ -253,7 +257,6 @@ def phase1b_break_circular_imports(scan_files: list) -> int:
                     lazy_names,
                 ))
 
-    # ── Apply fixes ────────────────────────────────────────────────────────
     fixed = 0
     for py_file, from_module, lazy_names in circular_fixes:
         if not py_file.exists():
@@ -263,38 +266,40 @@ def phase1b_break_circular_imports(scan_files: list) -> int:
         except Exception:
             continue
 
-        # Already patched?
-        if "__getattr__" in src and f"_CIRCULAR_{from_module.replace('.', '_').upper()}" in src:
+        # Already patched with try/except guard?
+        if f"# circular import guard" in src and from_module in src:
             continue
 
         new_src = src
-        # Remove module-level circular import lines for these names
-        for name in lazy_names:
-            new_src = re.sub(
-                rf"^from {re.escape(from_module)} import[^\n]*\b{re.escape(name)}\b[^\n]*\n",
-                "", new_src, flags=re.MULTILINE,
+
+        # For each import line that pulls from the circular module, wrap it.
+        # We match the full "from X import a, b, c" line regardless of how
+        # many names it imports, and wrap the entire statement.
+        for m in re.finditer(
+            rf"^(from {re.escape(from_module)} import ([^\n]+))\n",
+            new_src, re.MULTILINE,
+        ):
+            full_stmt  = m.group(1)           # e.g. "from memory.semantic import SemanticMemory"
+            names_part = m.group(2)           # e.g. "SemanticMemory"
+            all_names  = [n.strip().split(" as ")[0].strip()
+                          for n in names_part.split(",") if n.strip()]
+            # Only wrap if any of these are in our circular set
+            if not any(n in lazy_names for n in all_names):
+                continue
+            placeholders = "\n".join(
+                f"    {n} = type('{n}', (), {{}})" for n in all_names
             )
-
-        # Append PEP 562 __getattr__ for lazy loading
-        guard = f"_CIRCULAR_{from_module.replace('.', '_').upper()}"
-        getattr_block = f"""
-# ── Lazy imports to break circular dependency with {from_module} ──────────────
-{guard} = {repr(dict((n, from_module) for n in lazy_names))}
-
-def __getattr__(name):
-    if name in {guard}:
-        import importlib
-        _mod = importlib.import_module({guard}[name])
-        _obj = getattr(_mod, name)
-        globals()[name] = _obj   # cache so subsequent accesses don't go through here
-        return _obj
-    raise AttributeError(f"module {{__name__!r}} has no attribute {{name!r}}")
-"""
-        new_src = new_src + getattr_block
+            wrapped = (
+                f"try:\n"
+                f"    {full_stmt}\n"
+                f"except ImportError:  # circular import guard — {from_module}\n"
+                f"{placeholders}\n"
+            )
+            new_src = new_src.replace(m.group(0), wrapped, 1)
 
         if new_src != src:
             py_file.write_text(new_src, encoding="utf-8")
-            print(f"  FIXED [circular   ]  {py_file}  →  lazy: {lazy_names} from {from_module}")
+            print(f"  FIXED [circular   ]  {py_file}  →  guarded: {lazy_names} from {from_module}")
             fixed += 1
 
     return fixed

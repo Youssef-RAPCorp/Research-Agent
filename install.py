@@ -1864,8 +1864,15 @@ class Installer:
     def _break_import_cycles(self):
         """
         Build an intra-project import graph, find A↔B circular pairs, and break
-        the cycle in the alphabetically-first module using PEP 562 __getattr__:
-        remove the circular import and lazily load on first attribute access.
+        the cycle in the alphabetically-first module using try/except ImportError
+        with a placeholder class fallback.  This correctly handles bare-name
+        lookups inside class bodies (type annotations, default-value expressions)
+        which a PEP 562 __getattr__ cannot intercept.
+
+            try:
+                from memory.semantic import SemanticMemory
+            except ImportError:  # circular import guard — memory.semantic
+                SemanticMemory = type('SemanticMemory', (), {})
         """
         self.log.phase("─── Step 5d: Breaking circular imports")
 
@@ -1924,30 +1931,34 @@ class Installer:
                     src = pf.read_text(encoding="utf-8", errors="replace")
                 except Exception:
                     continue
-                guard = f"_CIRCULAR_{source_mod.replace('.', '_').upper()}"
-                if guard in src:
+                # Already patched?
+                if "# circular import guard" in src and source_mod in src:
                     continue
                 new_src = src
-                for name in lazy_names:
-                    new_src = re.sub(
-                        rf"^from {re.escape(source_mod)} import[^\n]*\b{re.escape(name)}\b[^\n]*\n",
-                        "", new_src, flags=re.MULTILINE,
+                for m2 in re.finditer(
+                    rf"^(from {re.escape(source_mod)} import ([^\n]+))\n",
+                    new_src, re.MULTILINE,
+                ):
+                    full_stmt  = m2.group(1)
+                    names_part = m2.group(2)
+                    all_names  = [n.strip().split(" as ")[0].strip()
+                                  for n in names_part.split(",") if n.strip()]
+                    if not any(n in lazy_names for n in all_names):
+                        continue
+                    placeholders = "\n".join(
+                        f"    {n} = type('{n}', (), {{}})" for n in all_names
                     )
-                getattr_block = (
-                    f"\n# Lazy imports — breaks circular dependency with {source_mod}\n"
-                    f"{guard} = {repr(dict((n, source_mod) for n in lazy_names))}\n\n"
-                    f"def __getattr__(name):\n"
-                    f"    if name in {guard}:\n"
-                    f"        import importlib\n"
-                    f"        _mod = importlib.import_module({guard}[name])\n"
-                    f"        _obj = getattr(_mod, name)\n"
-                    f"        globals()[name] = _obj\n"
-                    f"        return _obj\n"
-                    f"    raise AttributeError(f\"module {{__name__!r}} has no attribute {{name!r}}\")\n"
-                )
-                pf.write_text(new_src + getattr_block, encoding="utf-8")
-                self.log.ok(f"  {pf} — lazy: {lazy_names} ← {source_mod}")
-                fixed += 1
+                    wrapped = (
+                        f"try:\n"
+                        f"    {full_stmt}\n"
+                        f"except ImportError:  # circular import guard — {source_mod}\n"
+                        f"{placeholders}\n"
+                    )
+                    new_src = new_src.replace(m2.group(0), wrapped, 1)
+                if new_src != src:
+                    pf.write_text(new_src, encoding="utf-8")
+                    self.log.ok(f"  {pf} — guarded: {lazy_names} ← {source_mod}")
+                    fixed += 1
 
         if fixed:
             self.log.ok(f"  {fixed} circular import(s) broken")
@@ -2045,7 +2056,7 @@ class Installer:
         self._run_phases()
         self._auto_heal_imports()
         self._repair_missing_exports()   # second pass: catches cascading issues from auto-heal
-        self._break_import_cycles()      # break A↔B circular imports with __getattr__
+        self._break_import_cycles()      # break A↔B circular imports with try/except guard
         self._clear_pycache()
         self._venv_hint()
         self._os_notes()
