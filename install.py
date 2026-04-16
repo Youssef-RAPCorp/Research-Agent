@@ -253,8 +253,7 @@ REGISTRY = [
   # Phase 5 — Agent Framework
   {"phase":5,"id":"base_agent",           "name":"Base Agent Class",          "complexity":9, "path":"agents/base_agent.py",
    "desc":"Abstract agent base: tool calling protocol, P2P messaging hooks, memory interface, lifecycle management, and thinking pattern dispatch."},
-  {"phase":5,"id":"agent_registry",       "name":"Agent Registry",            "complexity":6, "path":"agents/registry.py",
-   "desc":"Dynamic agent registration, discovery by capability, health monitoring with heartbeat, and graceful lifecycle management."},
+  # agent_registry is hardcoded in REGISTRY_PY and written by _scaffold — not AI-generated
   {"phase":5,"id":"comm_bus",             "name":"P2P Communication Bus",     "complexity":10,"path":"agents/comm_bus.py",
    "desc":"Direct agent-to-agent pub/sub bus: topic routing, broadcast, request-reply pattern, async message queue, and delivery guarantees."},
   {"phase":5,"id":"orchestrator_agent",   "name":"Orchestrator Agent",        "complexity":11,"path":"agents/orchestrator.py",
