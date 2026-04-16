@@ -567,11 +567,15 @@ Rules:
                         code, count=1, flags=re.DOTALL
                     )
 
-        # orchestrator.py: fix bare super().__init__() → pass required BaseAgent args
-        if ph.endswith("agents/orchestrator.py"):
+        # All agent files: fix bare super().__init__() → pass required BaseAgent args.
+        # Derive agent_id and name from the first class name in the file.
+        if ph.startswith("agents/"):
+            cls_match = re.search(r'^class (\w+)', code, re.MULTILINE)
+            cls_name = cls_match.group(1) if cls_match else Path(ph).stem
+            agent_id = re.sub(r'(?<!^)(?=[A-Z])', '_', cls_name).lower().rstrip('_agent')
             code = re.sub(
                 r'super\(\)\.__init__\(\)',
-                'super().__init__(agent_id="orchestrator", name="PhysicsOrchestrator")',
+                f'super().__init__(agent_id="{agent_id}", name="{cls_name}")',
                 code
             )
 
