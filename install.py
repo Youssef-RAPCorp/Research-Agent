@@ -535,6 +535,26 @@ Rules:
         code = re.sub(r'from \.\.([\w])', r'from \1', code)
         code = re.sub(r'^from \.\. import .+\n?', '', code, flags=re.MULTILINE)
 
+        # Break circular imports: non-orchestrator files must not import
+        # PhysicsOrchestrator at module level — move to TYPE_CHECKING guard
+        ph = path_hint.replace("\\", "/")
+        if not ph.endswith("agents/orchestrator.py"):
+            code = re.sub(
+                r'^(from agents\.orchestrator import .+)$',
+                r'from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    \1',
+                code, flags=re.MULTILINE
+            )
+            code = re.sub(
+                r'^(import agents\.orchestrator.*)$',
+                r'from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    \1',
+                code, flags=re.MULTILINE
+            )
+
+        # Add "from __future__ import annotations" to defer annotation evaluation
+        # (breaks many circular-import cycles caused by type hints)
+        if code and "from __future__ import annotations" not in code:
+            code = "from __future__ import annotations\n" + code
+
         code = cls._fix_bad_imports(code)
 
         # Ensure known required exports exist in their respective modules
