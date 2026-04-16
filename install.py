@@ -599,6 +599,8 @@ Rules:
             ],
             "agents/orchestrator.py": [
                 ("PhysicsOrchestrator", "class PhysicsOrchestrator:\n    async def run(self, query: str, mode: str = 'standard', pattern: str = 'down_adaptive'):\n        raise NotImplementedError('PhysicsOrchestrator.run not yet implemented')"),
+                ("_process_cycle", "    async def _process_cycle(self, *args, **kwargs):\n        pass"),
+                ("on_message_received", "    async def on_message_received(self, message, *args, **kwargs):\n        pass"),
             ],
             "agents/registry.py": [
                 ("register_agent", "_agent_registry = {}\n\ndef register_agent(name: str):\n    def decorator(cls):\n        _agent_registry[name] = cls\n        return cls\n    return decorator\n\ndef get_agent(name: str):\n    return _agent_registry.get(name)\n\ndef get_all_agents():\n    return dict(_agent_registry)"),
