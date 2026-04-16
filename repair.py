@@ -931,6 +931,77 @@ def phase5_fix_abstract_methods(scan_files: list) -> int:
     return fixed
 
 
+def phase6_inject_agent_run_method(scan_files: list) -> int:
+    """
+    The orchestrator expects every agent object to have a `.run(...)` method.
+    Scan every class whose name ends in 'Agent' (or is named 'Agent') and
+    inject a minimal `async def run` stub if none exists.
+    The stub delegates to `process_task` if available, else returns None.
+    """
+    fixed = 0
+    for py_file in scan_files:
+        if not py_file.exists() or py_file.name in ('repair.py', 'install.py'):
+            continue
+        try:
+            src = py_file.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            continue
+
+        # Only touch files that contain at least one *Agent class definition
+        if not re.search(r'^class \w*Agent\b', src, re.MULTILINE):
+            continue
+
+        new_src = src
+        any_change = False
+
+        class_matches = list(re.finditer(r'^class (\w*Agent\b[^:]*)\s*:', new_src, re.MULTILINE))
+        for cls_m in reversed(class_matches):
+            cls_name = cls_m.group(1).split('(')[0].strip()
+
+            # Indentation-based body extraction
+            body_lines: list = []
+            last_indented_end = cls_m.end()
+            scan_pos = cls_m.end()
+            nl = new_src.find('\n', scan_pos)
+            scan_pos = (nl + 1) if nl != -1 else len(new_src)
+            while scan_pos < len(new_src):
+                nl = new_src.find('\n', scan_pos)
+                line_end = nl if nl != -1 else len(new_src)
+                line = new_src[scan_pos:line_end]
+                if not line.strip():
+                    body_lines.append(line); scan_pos = line_end + 1; continue
+                if line[:1] in (' ', '\t'):
+                    body_lines.append(line)
+                    last_indented_end = line_end + 1
+                    scan_pos = line_end + 1; continue
+                break
+            body = '\n'.join(body_lines)
+
+            # Already has a run method?
+            if re.search(r'^[ \t]+(?:async\s+)?def run\s*\(', body, re.MULTILINE):
+                continue
+
+            # Delegate to process_task if present, else return None
+            if re.search(r'^[ \t]+(?:async\s+)?def process_task\s*\(', body, re.MULTILINE):
+                body_stmt = 'return await self.process_task(*args, **kwargs)'
+            else:
+                body_stmt = 'return None'
+
+            stub = (
+                f'\n    async def run(self, *args, **kwargs):\n'
+                f'        {body_stmt}\n'
+            )
+            ins = last_indented_end
+            new_src = new_src[:ins] + stub + new_src[ins:]
+            any_change = True
+            print(f"  FIXED [agent.run  ]  {py_file}:{cls_name}  →  injected async def run")
+
+        if any_change:
+            py_file.write_text(new_src, encoding='utf-8')
+            fixed += 1
+    return fixed
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def run():
@@ -971,6 +1042,10 @@ def run():
     print("\n  Phase 5b: Stubbing abstract methods in concrete subclasses")
     print("  " + "─" * 52)
     total_fixed += phase5_fix_abstract_methods(scan_files)
+
+    print("\n  Phase 6: Injecting async def run() into Agent classes")
+    print("  " + "─" * 52)
+    total_fixed += phase6_inject_agent_run_method(scan_files)
 
     # Second pass of Phase 2 — earlier phases may expose new import mismatches
     print("\n  Phase 2 (second pass)")
