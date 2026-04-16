@@ -4,15 +4,18 @@ Physics Discovery System v3.0 — Import Repair Tool
 ===================================================
 RAP Corp | Renaissance of American Physics
 
-Two-phase repair:
-  Phase 1 — Inject missing class aliases / function stubs so all
-             "from X import Y" statements resolve at import time.
-  Phase 2 — Make all __init__ required positional params optional
-             (default=None) so any ClassName() call won't crash on
-             "missing N required positional arguments".
-
-Run from the project root:
+Three-phase repair — run from the project root:
     python repair.py
+
+  Phase 1 — Remove function stubs that shadow real class definitions.
+             e.g. def ArXivSearchAgent(*args, **kwargs): raise NotImplementedError
+             that appears after class ArXivSearchAgent in the same file.
+
+  Phase 2 — Inject missing class aliases / function stubs so all
+             "from X import Y" statements resolve at import time.
+
+  Phase 3 — Make all __init__ required positional params optional
+             (default=None) so ClassName() calls don't crash.
 
 Safe to run multiple times — only changes what's still broken.
 """
@@ -48,7 +51,7 @@ def defined_names(path: Path) -> set:
         src = path.read_text(encoding="utf-8", errors="replace")
     except Exception:
         return set()
-    names = set()
+    names: set = set()
     for m in re.finditer(r'^(?:def |class |(\w+)\s*=)', src, re.MULTILINE):
         if m.lastindex and m.group(1):
             names.add(m.group(1))
@@ -64,7 +67,7 @@ def defined_names(path: Path) -> set:
 def add_alias(target: Path, name: str, existing_classes: list) -> bool:
     src = target.read_text(encoding="utf-8", errors="replace")
     if re.search(rf'^{re.escape(name)}\s*=', src, re.MULTILINE):
-        return False  # already present
+        return False
     if existing_classes:
         matches = difflib.get_close_matches(name, existing_classes, n=1, cutoff=0.3)
         alias_target = matches[0] if matches else existing_classes[0]
@@ -88,15 +91,11 @@ def add_function_stub(target: Path, name: str) -> bool:
 
 
 def make_init_optional(code: str) -> tuple:
-    """
-    Convert required positional __init__ params to optional (default=None).
-    Returns (new_code, list_of_param_names_changed).
-    """
+    """Convert required positional __init__ params to optional (default=None)."""
     changed_params: list = []
 
     def _fix(m):
         params_raw = m.group(1)
-        # Split on commas at depth 0 (handles nested brackets in defaults)
         tokens, current, depth = [], "", 0
         for ch in params_raw:
             if ch in "([{":
@@ -114,14 +113,11 @@ def make_init_optional(code: str) -> tuple:
         new_tokens = []
         for tok in tokens:
             s = tok.strip()
-            # Keep self, *args, **kwargs, already-defaulted params unchanged
             if not s or s == "self" or s.startswith("*") or "=" in s:
                 new_tokens.append(tok)
                 continue
-            # Strip type annotation to get bare name
             name = s.split(":")[0].strip() if ":" in s else s
             changed_params.append(name)
-            # Preserve leading whitespace (multi-line signatures)
             indent = tok[: len(tok) - len(tok.lstrip())]
             new_tokens.append(f"{indent}{name}=None")
 
@@ -131,9 +127,65 @@ def make_init_optional(code: str) -> tuple:
     return new_code, changed_params
 
 
-# ── Phase 1: missing exports ──────────────────────────────────────────────────
+# ── Phase 1: Remove shadowing stubs ──────────────────────────────────────────
 
-def phase1_fix_imports(scan_files: list) -> int:
+def phase1_remove_shadowing_stubs(scan_files: list) -> int:
+    """
+    Remove function/lambda stubs that shadow real class definitions.
+
+    Two known patterns injected by older installer versions:
+      def ClassName(*args, **kwargs):
+          raise NotImplementedError('ClassName not yet implemented')
+
+      def ClassName(*args, **kwargs):
+          pass
+
+    These appear AFTER the real class definition and overwrite the class
+    name in the module namespace when Python executes the file.
+    """
+    fixed = 0
+    for py_file in scan_files:
+        if py_file.name in ("repair.py", "install.py"):
+            continue
+        try:
+            src = py_file.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+
+        real_classes = set(re.findall(r'^class (\w+)', src, re.MULTILINE))
+        if not real_classes:
+            continue
+
+        # Match the stub function only when it appears AFTER the real class.
+        # The body is a single-line raise or pass (both patterns used historically).
+        pat = (
+            r'\n+def ('
+            + '|'.join(re.escape(c) for c in real_classes)
+            + r')\([^)]*\):\s*\n[ \t]+(?:raise NotImplementedError\([^)]*\)|pass)\s*\n?'
+        )
+        new_src = re.sub(pat, '', src)
+
+        if new_src != src:
+            # Identify which stub names were removed
+            before = set(re.findall(
+                r'def (' + '|'.join(re.escape(c) for c in real_classes) + r')\(',
+                src,
+            ))
+            after = set(re.findall(
+                r'def (' + '|'.join(re.escape(c) for c in real_classes) + r')\(',
+                new_src,
+            ))
+            removed = before - after
+            py_file.write_text(new_src, encoding="utf-8")
+            print(f"  FIXED [shadow stub]  {py_file}  →  removed def(s): {', '.join(sorted(removed))}")
+            fixed += 1
+
+    return fixed
+
+
+# ── Phase 2: Fix missing imports ─────────────────────────────────────────────
+
+def phase2_fix_imports(scan_files: list) -> int:
     fixed = 0
     problems = []
 
@@ -143,7 +195,7 @@ def phase1_fix_imports(scan_files: list) -> int:
         except Exception:
             continue
 
-        # Collapse parenthesized multi-line imports to single lines
+        # Collapse parenthesized multi-line imports
         src_flat = re.sub(
             r"from ([\w.]+) import \(([^)]+)\)",
             lambda mm: f"from {mm.group(1)} import {', '.join(mm.group(2).split())}",
@@ -157,7 +209,6 @@ def phase1_fix_imports(scan_files: list) -> int:
             if top not in PROJECT_PKGS:
                 continue
 
-            # Strip "as alias" parts
             raw_names = [n.strip().split(" as ")[0].strip()
                          for n in m.group(2).split(",")]
             imported = [n for n in raw_names if n and not n.startswith("_")]
@@ -198,17 +249,17 @@ def phase1_fix_imports(scan_files: list) -> int:
         print()
         for p in problems:
             print(p)
-        print("  NOTE: missing .py files above need 'python install.py' to generate them.")
+        print("  NOTE: missing .py files need 'python install.py' to generate them.")
 
     return fixed
 
 
-# ── Phase 2: __init__ optional params ────────────────────────────────────────
+# ── Phase 3: Make __init__ params optional ────────────────────────────────────
 
-def phase2_fix_init_params(scan_files: list) -> int:
+def phase3_fix_init_params(scan_files: list) -> int:
     fixed = 0
     for py_file in scan_files:
-        if py_file.name == "repair.py" or py_file.name == "install.py":
+        if py_file.name in ("repair.py", "install.py"):
             continue
         try:
             src = py_file.read_text(encoding="utf-8", errors="replace")
@@ -217,7 +268,7 @@ def phase2_fix_init_params(scan_files: list) -> int:
         new_src, changed = make_init_optional(src)
         if changed:
             py_file.write_text(new_src, encoding="utf-8")
-            print(f"  FIXED [__init__   ]  {py_file}  →  made optional: {', '.join(changed)}")
+            print(f"  FIXED [__init__   ]  {py_file}  →  optional: {', '.join(changed)}")
             fixed += 1
     return fixed
 
@@ -231,20 +282,26 @@ def run():
     scan_files = all_project_py_files()
     total_fixed = 0
 
-    print("\n  Phase 1: Fixing missing exports (aliases / stubs)")
+    print("\n  Phase 1: Removing shadowing stubs (def shadows class)")
     print("  " + "─" * 52)
-    total_fixed += phase1_fix_imports(scan_files)
+    total_fixed += phase1_remove_shadowing_stubs(scan_files)
 
-    print("\n  Phase 2: Making __init__ params optional (default=None)")
+    print("\n  Phase 2: Fixing missing exports (aliases / stubs)")
     print("  " + "─" * 52)
-    total_fixed += phase2_fix_init_params(scan_files)
+    total_fixed += phase2_fix_imports(scan_files)
 
-    # Run Phase 1 a second time — Phase 2 may have changed files that now
-    # expose new import mismatches (rare but possible).
-    second = phase1_fix_imports(scan_files)
+    print("\n  Phase 3: Making __init__ params optional (default=None)")
+    print("  " + "─" * 52)
+    total_fixed += phase3_fix_init_params(scan_files)
+
+    # Second pass of Phase 2 — Phase 1/3 may expose new import mismatches
+    print("\n  Phase 2 (second pass)")
+    print("  " + "─" * 52)
+    second = phase2_fix_imports(scan_files)
     if second:
-        print(f"\n  (second-pass Phase 1: {second} more fix(es))")
         total_fixed += second
+    else:
+        print("  Nothing new.")
 
     print()
     if total_fixed:

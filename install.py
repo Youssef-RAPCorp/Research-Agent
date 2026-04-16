@@ -1377,6 +1377,12 @@ class Installer:
             is_stub = (
                 "Module not yet installed:" in content
                 or "STUB (install failed)" in content
+                # Shadowing stub: function with same name as a class raises NotImplementedError
+                # at module level, overwriting the real class in the namespace.
+                or bool(re.search(
+                    r'^def (\w+)\([^)]*\):\s*\n[ \t]+raise NotImplementedError\b',
+                    content, re.MULTILINE,
+                ))
             )
             # Apply compatibility patches to existing files
             if not is_stub and out.suffix == ".py":
