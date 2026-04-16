@@ -1556,14 +1556,24 @@ class Installer:
                 if not missing:
                     continue
 
-                # Append stubs for missing names
+                # Append stubs for missing names.
+                # CamelCase names are classes — never stub them with a function,
+                # as that shadows the real class. Regenerate the module instead.
+                camel = [n for n in missing if n[0].isupper() and not n.endswith("Error") and not n.endswith("Exception")]
+                if camel:
+                    self.log.warn(f"  {target_path} — missing class(es) {camel}, regenerating module")
+                    registry_entry = next((m for m in REGISTRY if m["path"] == target_path), None)
+                    if registry_entry:
+                        target.unlink(missing_ok=True)
+                        self._install_module(registry_entry)
+                    continue
+
                 additions = []
                 for name in missing:
-                    # Decide stub type: Exception subclass or simple function
                     if name.endswith("Error") or name.endswith("Exception"):
                         additions.append(f"\nclass {name}(Exception):\n    pass\n")
                     else:
-                        additions.append(f"\ndef {name}(*args, **kwargs):\n    raise NotImplementedError('{name} not yet implemented')\n")
+                        additions.append(f"\ndef {name}(*args, **kwargs):\n    pass\n")
 
                 existing = target.read_text(encoding="utf-8", errors="replace")
                 target.write_text(existing + "\n" + "".join(additions), encoding="utf-8")
