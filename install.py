@@ -836,6 +836,24 @@ aiofiles>=24.1.0
 tiktoken>=0.7.0
 """
 
+UTILS_CONFIG_PY = '''"""
+utils/config — compatibility shim
+AI-generated modules sometimes import from utils.config instead of config.settings.
+This re-exports everything from the canonical module so those imports don't break.
+"""
+from config.settings import *  # noqa: F401,F403
+try:
+    from config.settings import get_settings, Settings
+except ImportError:
+    pass
+'''
+
+UTILS_INIT_PY = '''"""
+utils — Physics Discovery System v3.0
+Compatibility shims for AI-generated modules that reference non-standard paths.
+"""
+'''
+
 REGISTRY_PY = '''"""
 Agent Registry — Physics Discovery System v3.0
 RAP Corp | Renaissance of American Physics
@@ -1098,10 +1116,13 @@ class Installer:
             if not p.exists():
                 p.write_text(content, encoding="utf-8")
 
-        # registry.py is always force-written from the hardcoded template —
-        # AI-generated versions reliably stub register_agent and AgentRegistry
+        # These files are always force-written from hardcoded templates —
+        # AI-generated versions are unreliable for these foundational modules.
         Path("agents/registry.py").write_text(REGISTRY_PY, encoding="utf-8")
-        self.log.ok("  agents/registry.py — hardcoded template written")
+        Path("utils").mkdir(exist_ok=True)
+        Path("utils/__init__.py").write_text(UTILS_INIT_PY, encoding="utf-8")
+        Path("utils/config.py").write_text(UTILS_CONFIG_PY, encoding="utf-8")
+        self.log.ok("  agents/registry.py + utils/ — hardcoded templates written")
         self.log.ok(f"{len(DIRS)} directories + scaffolding files created")
 
     # ── Install a single module ───────────────────────────────────────────
