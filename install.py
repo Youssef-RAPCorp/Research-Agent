@@ -558,51 +558,16 @@ Rules:
                 code
             )
 
-        # Un-guard any config.* / utils.* imports that were previously and
-        # incorrectly placed under TYPE_CHECKING — they must run at runtime.
-        def _ungaurd_config(m: re.Match) -> str:
-            return m.group(1)  # strip the TYPE_CHECKING wrapper, keep the import
+        # Undo any TYPE_CHECKING guards on project imports — these were added by
+        # a previous broken patcher and prevent runtime imports from working.
         code = re.sub(
-            r'if TYPE_CHECKING:\n    (from (?:config|utils)\..*)',
-            _ungaurd_config,
-            code, flags=re.MULTILINE
-        )
-
-        # Break circular imports: cross-package project imports that cause
-        # "partially initialized module" errors get moved under TYPE_CHECKING
-        # so they never execute at runtime.
-        this_pkg = ph.split("/")[0] if "/" in ph else ""
-        PROJECT_PKGS = (
-            "agents","config","knowledge","memory",
-            "thinking","physics","discovery","interface","utils",
-        )
-
-        # config.* is foundational — always needed at runtime, never circular
-        ALWAYS_ALLOW = {"config", "utils"}
-
-        def _guard_cross_pkg(m: re.Match) -> str:
-            stmt = m.group(0)
-            src_pkg = re.match(r'from ([\w]+)\.', stmt)
-            if not src_pkg:
-                return stmt
-            pkg = src_pkg.group(1)
-            if pkg not in PROJECT_PKGS or pkg == this_pkg or pkg in ALWAYS_ALLOW:
-                return stmt  # foundational, same package, or third-party — leave alone
-            # Guard under TYPE_CHECKING to break the runtime circular chain
-            return (
-                "from typing import TYPE_CHECKING  # noqa\n"
-                "if TYPE_CHECKING:\n"
-                f"    {stmt}"
-            )
-
-        code = re.sub(
-            r'^from (?!__future__|typing\b)([\w]+)\.([\w.]+) import .+$',
-            _guard_cross_pkg,
+            r'(?:from typing import TYPE_CHECKING\s*#?\s*noqa?\n)?if TYPE_CHECKING:\n    (from [\w].*)',
+            r'\1',
             code, flags=re.MULTILINE
         )
 
         # Add "from __future__ import annotations" to defer annotation evaluation
-        # (breaks many circular-import cycles caused by type hints)
+        # (breaks annotation-based circular-import cycles without hiding runtime imports)
         if code and "from __future__ import annotations" not in code:
             code = "from __future__ import annotations\n" + code
 
