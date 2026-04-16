@@ -933,11 +933,37 @@ def phase5_fix_abstract_methods(scan_files: list) -> int:
 
 def phase6_inject_agent_run_method(scan_files: list) -> int:
     """
-    The orchestrator expects every agent object to have a `.run(...)` method.
-    Scan every class whose name ends in 'Agent' (or is named 'Agent') and
-    inject a minimal `async def run` stub if none exists.
-    The stub delegates to `process_task` if available, else returns None.
+    Ensure every *Agent class has a meaningful async def run(...) method.
+
+    - If run is missing                 → inject a stub delegating to the best method
+    - If run is our naive process_task stub → replace it with a smart delegate
+    - Real run methods (not our stub)   → left untouched
+
+    Delegation priority (first found wins):
+      process_message       → wraps query in dict  {'query':..., 'type':'comprehensive'}
+      comprehensive_research, process_query, execute, analyze,
+      search, synthesize, process  → pass args/kwargs directly
+      process_task                  → last resort (likely returns None)
     """
+    # The naive stub we injected in previous runs — safe to replace
+    OUR_STUB = re.compile(
+        r'\n[ \t]+async def run\(self,[ \t]*\*args,[ \t]*\*\*kwargs\):[ \t]*\n'
+        r'[ \t]+return await self\.process_task\(\*args,[ \t]*\*\*kwargs\)[ \t]*\n'
+    )
+
+    # (method_name, needs_dict_wrapper)
+    DELEGATES = [
+        ('process_message',        True),
+        ('comprehensive_research', False),
+        ('process_query',          False),
+        ('execute',                False),
+        ('analyze',                False),
+        ('search',                 False),
+        ('synthesize',             False),
+        ('process',                False),
+        ('process_task',           False),
+    ]
+
     fixed = 0
     for py_file in scan_files:
         if not py_file.exists() or py_file.name in ('repair.py', 'install.py'):
@@ -946,8 +972,6 @@ def phase6_inject_agent_run_method(scan_files: list) -> int:
             src = py_file.read_text(encoding='utf-8', errors='replace')
         except Exception:
             continue
-
-        # Only touch files that contain at least one *Agent class definition
         if not re.search(r'^class \w*Agent\b', src, re.MULTILINE):
             continue
 
@@ -976,25 +1000,53 @@ def phase6_inject_agent_run_method(scan_files: list) -> int:
                     scan_pos = line_end + 1; continue
                 break
             body = '\n'.join(body_lines)
-
-            # Already has a run method?
-            if re.search(r'^[ \t]+(?:async\s+)?def run\s*\(', body, re.MULTILINE):
-                continue
-
-            # Delegate to process_task if present, else return None
-            if re.search(r'^[ \t]+(?:async\s+)?def process_task\s*\(', body, re.MULTILINE):
-                body_stmt = 'return await self.process_task(*args, **kwargs)'
-            else:
-                body_stmt = 'return None'
-
-            stub = (
-                f'\n    async def run(self, *args, **kwargs):\n'
-                f'        {body_stmt}\n'
-            )
             ins = last_indented_end
-            new_src = new_src[:ins] + stub + new_src[ins:]
+            cls_body_start = cls_m.end()
+
+            has_run    = bool(re.search(r'^[ \t]+(?:async\s+)?def run\s*\(', body, re.MULTILINE))
+            our_stub_m = OUR_STUB.search(new_src, cls_body_start, ins)
+
+            if has_run and not our_stub_m:
+                continue  # Real run method exists — leave it alone
+
+            # Find the best method to delegate to
+            delegate   = None
+            needs_dict = False
+            for method_name, dict_wrap in DELEGATES:
+                if re.search(rf'^[ \t]+(?:async\s+)?def {re.escape(method_name)}\s*\(',
+                             body, re.MULTILINE):
+                    delegate   = method_name
+                    needs_dict = dict_wrap
+                    break
+
+            if delegate is None:
+                continue  # Nothing useful to call
+
+            # Is the delegate itself async?
+            is_async = bool(re.search(
+                rf'^[ \t]+async\s+def {re.escape(delegate)}\s*\(', body, re.MULTILINE
+            ))
+            aw = 'await ' if is_async else ''
+
+            if needs_dict:
+                call = (
+                    f"query = args[0] if args else kwargs.get('query', '')\n"
+                    f"        return {aw}self.{delegate}({{'query': query, 'type': 'comprehensive'}})"
+                )
+            else:
+                call = f"return {aw}self.{delegate}(*args, **kwargs)"
+
+            new_stub = f'\n    async def run(self, *args, **kwargs):\n        {call}\n'
+
+            if our_stub_m:
+                new_src  = new_src[:our_stub_m.start()] + new_stub + new_src[our_stub_m.end():]
+                action   = f'replaced naive stub → {delegate}'
+            else:
+                new_src  = new_src[:ins] + new_stub + new_src[ins:]
+                action   = f'injected → {delegate}'
+
             any_change = True
-            print(f"  FIXED [agent.run  ]  {py_file}:{cls_name}  →  injected async def run")
+            print(f"  FIXED [agent.run  ]  {py_file}:{cls_name}  →  {action}")
 
         if any_change:
             py_file.write_text(new_src, encoding='utf-8')
