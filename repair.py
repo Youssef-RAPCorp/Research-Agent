@@ -687,6 +687,118 @@ def phase4_fix_init_params(scan_files: list) -> int:
     return fixed
 
 
+# ── Phase 5: Implement missing abstract methods ───────────────────────────────
+
+def _collect_abstract_methods(scan_files: list) -> dict:
+    """
+    Return {ClassName: [(method_name, is_async)]} for every class that
+    declares one or more @abstractmethod methods.
+    """
+    result: dict = {}
+    for py_file in scan_files:
+        if not py_file.exists():
+            continue
+        try:
+            src = py_file.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        if 'abstractmethod' not in src:
+            continue
+        # Walk class bodies looking for @abstractmethod
+        for cls_m in re.finditer(r'^class (\w+)[^:]*:', src, re.MULTILINE):
+            cls_name = cls_m.group(1)
+            after    = src[cls_m.end():]
+            # Collect lines until next top-level token
+            body_end = re.search(r'\n(?=[^\s\n])', after)
+            body     = after[:body_end.start()] if body_end else after
+            for am in re.finditer(
+                r'@abstractmethod[^\n]*\n\s*(async\s+)?def (\w+)\s*\(',
+                body,
+            ):
+                is_async   = bool(am.group(1))
+                method_name = am.group(2)
+                result.setdefault(cls_name, [])
+                if (method_name, is_async) not in result[cls_name]:
+                    result[cls_name].append((method_name, is_async))
+    return result
+
+
+def phase5_fix_abstract_methods(scan_files: list) -> int:
+    """
+    For every concrete class that inherits from an abstract base but does not
+    implement all of its @abstractmethod methods, inject minimal stub
+    implementations so the class can be instantiated without TypeError.
+
+        async def get_response(self, *args, **kwargs):
+            return None
+    """
+    abstract_map = _collect_abstract_methods(scan_files)
+    if not abstract_map:
+        return 0
+
+    fixed = 0
+    for py_file in scan_files:
+        if not py_file.exists() or py_file.name in ('repair.py', 'install.py'):
+            continue
+        try:
+            src = py_file.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+
+        new_src = src
+        any_change = False
+
+        for cls_m in re.finditer(r'^class (\w+)\(([^)]+)\)\s*:', new_src, re.MULTILINE):
+            cls_name  = cls_m.group(1)
+            bases_str = cls_m.group(2)
+            bases     = [b.strip().split('.')[-1] for b in bases_str.split(',')]
+
+            # Gather all abstract methods required by any base
+            required: list = []
+            for base in bases:
+                required.extend(abstract_map.get(base, []))
+            if not required:
+                continue
+
+            # Get the class body text to check what's already defined
+            after    = new_src[cls_m.end():]
+            body_end = re.search(r'\n(?=[^\s\n])', after)
+            body     = after[:body_end.start()] if body_end else after
+
+            # Find insert position: just before end of class body
+            if body_end:
+                ins = cls_m.end() + body_end.start()
+            else:
+                ins = len(new_src)
+
+            stubs_added: list = []
+            for method_name, is_async in required:
+                if re.search(
+                    rf'^\s+(?:async\s+)?def {re.escape(method_name)}\s*\(',
+                    body, re.MULTILINE,
+                ):
+                    continue  # already implemented
+                async_kw = "async " if is_async else ""
+                ret      = "await asyncio.sleep(0)\n        return None" if is_async else "return None"
+                stub     = (
+                    f"\n    {async_kw}def {method_name}(self, *args, **kwargs):\n"
+                    f"        {ret}\n"
+                )
+                new_src  = new_src[:ins] + stub + new_src[ins:]
+                ins     += len(stub)          # keep insert pos valid for next stub
+                body    += stub               # keep body in sync for dup checks
+                stubs_added.append(method_name)
+
+            if stubs_added:
+                any_change = True
+                print(f"  FIXED [abstract   ]  {py_file}:{cls_name}  →  stubbed: {stubs_added}")
+
+        if any_change:
+            py_file.write_text(new_src, encoding="utf-8")
+            fixed += 1
+    return fixed
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def run():
@@ -719,6 +831,10 @@ def run():
     print("\n  Phase 4: Making __init__ params optional (default=None)")
     print("  " + "─" * 52)
     total_fixed += phase4_fix_init_params(scan_files)
+
+    print("\n  Phase 5: Implementing missing abstract methods")
+    print("  " + "─" * 52)
+    total_fixed += phase5_fix_abstract_methods(scan_files)
 
     # Second pass of Phase 2 — earlier phases may expose new import mismatches
     print("\n  Phase 2 (second pass)")
