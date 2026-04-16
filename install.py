@@ -558,16 +558,28 @@ Rules:
                 code
             )
 
-        # Undo any TYPE_CHECKING guards on project imports — these were added by
-        # a previous broken patcher and prevent runtime imports from working.
+        # Undo any broad TYPE_CHECKING guards that were incorrectly applied to
+        # runtime-needed imports by a previous patcher version.
         code = re.sub(
             r'(?:from typing import TYPE_CHECKING\s*#?\s*noqa?\n)?if TYPE_CHECKING:\n    (from [\w].*)',
             r'\1',
             code, flags=re.MULTILINE
         )
 
+        # Targeted circular import fix: only guard imports OF orchestrator inside
+        # non-orchestrator files. Orchestrator is the hub that everything imports,
+        # so it must never be imported at module level by other agents.
+        if not ph.endswith("agents/orchestrator.py"):
+            code = re.sub(
+                r'^(from agents\.orchestrator import .+)$',
+                r'if TYPE_CHECKING:\n    \1',
+                code, flags=re.MULTILINE
+            )
+            # Ensure TYPE_CHECKING is imported if we just used it
+            if "if TYPE_CHECKING:" in code and "from typing import TYPE_CHECKING" not in code:
+                code = "from typing import TYPE_CHECKING\n" + code
+
         # Add "from __future__ import annotations" to defer annotation evaluation
-        # (breaks annotation-based circular-import cycles without hiding runtime imports)
         if code and "from __future__ import annotations" not in code:
             code = "from __future__ import annotations\n" + code
 
