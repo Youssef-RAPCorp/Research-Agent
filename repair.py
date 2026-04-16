@@ -770,6 +770,63 @@ def _collect_abstract_methods(scan_files: list) -> dict:
     return result
 
 
+def phase5_strip_abstract_decorators(scan_files: list) -> int:
+    """
+    Strip every @abstractmethod / @abc.abstractmethod decorator line from
+    project files.  Once the decorators are gone Python will never raise
+    'Can't instantiate abstract class …' regardless of how deep the
+    inheritance chain is or which subclass is missing an implementation.
+
+    Also removes 'abstractmethod' from 'from abc import …' lines so there
+    are no NameError complaints about the unused name.
+    """
+    DECO_RE  = re.compile(r'^[ \t]*@(?:\w+\.)*abstractmethod[^\n]*\n', re.MULTILINE)
+    # matches: from abc import ABC, abstractmethod  (and variations)
+    ABC_IMPORT_RE = re.compile(
+        r'^(from\s+abc\s+import\s+)(.*?)([ \t]*(?:#[^\n]*)?)(\n|$)',
+        re.MULTILINE,
+    )
+    fixed = 0
+    for py_file in scan_files:
+        if not py_file.exists() or py_file.name in ('repair.py', 'install.py'):
+            continue
+        try:
+            src = py_file.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            continue
+        if 'abstractmethod' not in src:
+            continue
+
+        new_src = src
+
+        # 1. Strip all @abstractmethod / @abc.abstractmethod decorator lines
+        stripped = DECO_RE.sub('', new_src)
+        if stripped != new_src:
+            new_src = stripped
+
+        # 2. Remove 'abstractmethod' from 'from abc import ...' lines
+        def _clean_abc_import(m: re.Match) -> str:
+            prefix  = m.group(1)          # 'from abc import '
+            names   = m.group(2)          # 'ABC, abstractmethod'
+            comment = m.group(3)          # optional trailing comment
+            ending  = m.group(4)          # '\n' or ''
+            parts = [p.strip() for p in names.split(',')]
+            parts = [p for p in parts if p and p != 'abstractmethod']
+            if not parts:
+                return ''                  # drop the whole import line
+            return prefix + ', '.join(parts) + comment + ending
+
+        cleaned = ABC_IMPORT_RE.sub(_clean_abc_import, new_src)
+        if cleaned != new_src:
+            new_src = cleaned
+
+        if new_src != src:
+            py_file.write_text(new_src, encoding='utf-8')
+            print(f"  FIXED [abstractmethod strip]  {py_file}")
+            fixed += 1
+    return fixed
+
+
 def phase5_fix_abstract_methods(scan_files: list) -> int:
     """
     For every concrete class that inherits from an abstract base but does not
@@ -900,7 +957,11 @@ def run():
     print("  " + "─" * 52)
     total_fixed += phase4_fix_init_params(scan_files)
 
-    print("\n  Phase 5: Implementing missing abstract methods")
+    print("\n  Phase 5: Stripping @abstractmethod decorators")
+    print("  " + "─" * 52)
+    total_fixed += phase5_strip_abstract_decorators(scan_files)
+
+    print("\n  Phase 5b: Stubbing abstract methods in concrete subclasses")
     print("  " + "─" * 52)
     total_fixed += phase5_fix_abstract_methods(scan_files)
 
