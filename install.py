@@ -897,7 +897,18 @@ class AgentRegistry:
     def __init__(self):
         self._instances: Dict[str, Any] = {}
 
-    def register(self, name: str, instance: Any) -> None:
+    def register(self, name: str, instance: Any = None):
+        """Works both as a direct call and as a class decorator.
+
+        Direct:    agent_registry.register("name", instance)
+        Decorator: @agent_registry.register("name")
+        """
+        if instance is None:
+            def decorator(cls):
+                self._instances[name] = cls
+                logger.info(f"Agent registered: {name}")
+                return cls
+            return decorator
         self._instances[name] = instance
         logger.info(f"Agent instance registered: {name}")
 
