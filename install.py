@@ -535,20 +535,36 @@ Rules:
         code = re.sub(r'from \.\.([\w])', r'from \1', code)
         code = re.sub(r'^from \.\. import .+\n?', '', code, flags=re.MULTILINE)
 
-        # Break circular imports: non-orchestrator files must not import
-        # PhysicsOrchestrator at module level — move to TYPE_CHECKING guard
+        # Break circular imports: cross-package project imports that cause
+        # "partially initialized module" errors get moved under TYPE_CHECKING
+        # so they never execute at runtime.
         ph = path_hint.replace("\\", "/")
-        if not ph.endswith("agents/orchestrator.py"):
-            code = re.sub(
-                r'^(from agents\.orchestrator import .+)$',
-                r'from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    \1',
-                code, flags=re.MULTILINE
+        this_pkg = ph.split("/")[0] if "/" in ph else ""
+        PROJECT_PKGS = (
+            "agents","config","knowledge","memory",
+            "thinking","physics","discovery","interface","utils",
+        )
+
+        def _guard_cross_pkg(m: re.Match) -> str:
+            stmt = m.group(0)
+            src_pkg = re.match(r'from ([\w]+)\.', stmt)
+            if not src_pkg:
+                return stmt
+            pkg = src_pkg.group(1)
+            if pkg not in PROJECT_PKGS or pkg == this_pkg:
+                return stmt  # same package or stdlib/third-party — leave alone
+            # Guard under TYPE_CHECKING to break the runtime circular chain
+            return (
+                "from typing import TYPE_CHECKING  # noqa\n"
+                "if TYPE_CHECKING:\n"
+                f"    {stmt}"
             )
-            code = re.sub(
-                r'^(import agents\.orchestrator.*)$',
-                r'from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    \1',
-                code, flags=re.MULTILINE
-            )
+
+        code = re.sub(
+            r'^from (?!__future__|typing\b)([\w]+)\.([\w.]+) import .+$',
+            _guard_cross_pkg,
+            code, flags=re.MULTILINE
+        )
 
         # Add "from __future__ import annotations" to defer annotation evaluation
         # (breaks many circular-import cycles caused by type hints)
