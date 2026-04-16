@@ -220,38 +220,26 @@ def _build_import_graph(scan_files: list) -> dict:
 def _fix_old_getattr_cycles(scan_files: list) -> int:
     """
     Convert __getattr__ lazy-import blocks written by an older version of
-    repair.py into the correct try/except ImportError + placeholder guard.
+    install.py/_break_import_cycles into try/except ImportError guards.
 
-    Old pattern (appended to end of file, import line already removed):
+    Trigger: file contains both '_CIRCULAR_' and 'def __getattr__(name):'.
+    That combination is the fingerprint of the old lazy-loader pattern.
 
-        # Lazy imports — breaks circular dependency with memory.semantic
-        _CIRCULAR_MEMORY_SEMANTIC = {'SemanticMemory': 'memory.semantic'}
-
-        def __getattr__(name):
-            if name in _CIRCULAR_MEMORY_SEMANTIC:
-                ...
-            raise AttributeError(...)
-
-    New pattern (injected after the last import line):
-
-        try:
-            from memory.semantic import SemanticMemory
-        except ImportError:  # circular import guard — memory.semantic
-            SemanticMemory = type('SemanticMemory', (), {})
+    Locates the _CIRCULAR_XXX dict, extracts {name: source_mod} entries,
+    removes the entire block (comment + dict + __getattr__ function), and
+    injects a try/except guard after the last top-level import line.
     """
-    OLD_BLOCK = re.compile(
-        r'\n# Lazy imports — breaks circular dependency with ([\w.]+)\n'
-        r'_CIRCULAR_\w+ = (\{[^}]+\})\n'
-        r'\n'
-        r'def __getattr__\(name\):\n'
-        r'    if name in \w+:\n'
-        r'        import importlib\n'
-        r'        _mod = importlib\.import_module\(\w+\[name\]\)\n'
-        r'        _obj = getattr\(_mod, name\)\n'
-        r'        globals\(\)\[name\] = _obj\n'
-        r'        return _obj\n'
-        r'    raise AttributeError\([^\n]+\)\n',
+    # Loose dict-line detector:  _CIRCULAR_XXX = {'Foo': 'pkg.mod', ...}
+    GUARD_LINE = re.compile(
+        r'^_CIRCULAR_[\w]+\s*=\s*(\{[^}]+\})',
+        re.MULTILINE,
     )
+    # Marks the very last line of the __getattr__ block we wrote
+    RAISE_LINE = re.compile(
+        r'    raise AttributeError\([^\n]*\)\n',
+        re.MULTILINE,
+    )
+
     fixed = 0
     for py_file in scan_files:
         if not py_file.exists():
@@ -260,30 +248,56 @@ def _fix_old_getattr_cycles(scan_files: list) -> int:
             src = py_file.read_text(encoding="utf-8", errors="replace")
         except Exception:
             continue
-        if "# Lazy imports — breaks circular dependency with" not in src:
+        # Quick pre-check using plain string — no em-dash dependency
+        if '_CIRCULAR_' not in src or 'def __getattr__(name):' not in src:
             continue
+
         new_src = src
-        for bm in OLD_BLOCK.finditer(src):
-            source_mod = bm.group(1)
-            dict_str   = bm.group(2)
-            names = [m.group(1) for m in re.finditer(r"'(\w+)':", dict_str)]
-            if not names:
+        for gm in list(GUARD_LINE.finditer(src)):
+            dict_str = gm.group(1)
+            # Parse {'Name1': 'pkg.mod', 'Name2': 'pkg.mod'}
+            entries = re.findall(r"['\"](\w+)['\"]:\s*['\"]([^'\"]+)['\"]", dict_str)
+            if not entries:
                 continue
-            placeholders = "\n".join(f"    {n} = type('{n}', (), {{}})" for n in names)
+            names      = [e[0] for e in entries]
+            source_mod = entries[0][1]   # all values share the same module
+
+            # ── Locate block boundaries ──────────────────────────────────
+            # Block start: look for a "# ... circular dependency ..." comment
+            # line immediately before the _CIRCULAR_ line, else the dict line.
+            block_start = gm.start()
+            preceding   = new_src[:block_start].rstrip('\n')
+            nl           = preceding.rfind('\n')
+            if nl != -1:
+                prev_line = preceding[nl + 1:]
+                if prev_line.lstrip().startswith('#') and 'circular' in prev_line.lower():
+                    # Include the newline that precedes the comment
+                    block_start = nl if new_src[nl - 1:nl] == '\n' else nl
+            # Block end: the raise AttributeError line inside __getattr__
+            getattr_pos = new_src.find('def __getattr__(name):', gm.end())
+            if getattr_pos == -1:
+                continue
+            em = RAISE_LINE.search(new_src, getattr_pos)
+            block_end = em.end() if em else len(new_src)
+
+            # ── Build replacement ─────────────────────────────────────────
+            placeholders = "\n".join(
+                f"    {n} = type('{n}', (), {{}})" for n in names
+            )
             try_block = (
                 f"\ntry:\n"
                 f"    from {source_mod} import {', '.join(names)}\n"
                 f"except ImportError:  # circular import guard — {source_mod}\n"
                 f"{placeholders}\n"
             )
-            # Remove old block from new_src
-            stripped = new_src.replace(bm.group(0), "", 1)
-            # Inject try/except after the last top-level import line
+
+            stripped    = new_src[:block_start] + new_src[block_end:]
             imp_matches = list(re.finditer(
                 r'^(?:from|import)\s+\S[^\n]*\n', stripped, re.MULTILINE,
             ))
-            ins = imp_matches[-1].end() if imp_matches else 0
+            ins     = imp_matches[-1].end() if imp_matches else 0
             new_src = stripped[:ins] + try_block + stripped[ins:]
+
         if new_src != src:
             py_file.write_text(new_src, encoding="utf-8")
             print(f"  FIXED [old->guard  ]  {py_file}  →  converted __getattr__ to try/except")
