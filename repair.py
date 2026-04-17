@@ -1093,6 +1093,7 @@ def phase6b_inject_process_message(scan_files: list) -> int:
     DELEGATES = [
         ('handle_message',        False),
         ('receive_message',       False),
+        ('process_request',       False),   # synthesis-style agents
         ('synthesize',            False),
         ('process_query',         False),
         ('execute',               False),
@@ -1409,6 +1410,74 @@ def phase9_arxiv_rate_limit_backoff(scan_files: list) -> int:
     return fixed
 
 
+# ── Phase 11: Fix SynthesisAgent-style run() stubs ───────────────────────────
+
+def phase11_fix_synthesis_run_stub(scan_files: list) -> int:
+    """
+    Fix injected run() stubs in agents whose real entry-point is process_request,
+    which expects a dict with an 'agent_outputs' key (not a bare query string).
+
+    Phase 6 injected:
+        async def run(self, *args, **kwargs):
+            query = args[0] if args else kwargs.get('query', '')
+            return await self.process_message({'query': query, 'type': '...'})
+
+    The orchestrator calls:  synthesis_agent.run(combined_string, query=query)
+    so args[0] is the COMBINED RESEARCH TEXT, not a query.
+
+    process_request reads:  request.get('agent_outputs', {})
+    — so passing {'query': ..., 'type': 'comprehensive'} yields empty evidence.
+
+    Replacement:
+        async def run(self, *args, **kwargs):
+            combined = args[0] if args else ''
+            query = kwargs.get('query', args[1] if len(args) > 1 else '')
+            return await self.process_request(
+                {'agent_outputs': {'combined': combined}, 'query': query}
+            )
+    """
+    OUR_RUN_STUB = re.compile(
+        r'\n([ \t]+)async def run\(self,[ \t]*\*args,[ \t]*\*\*kwargs\):[ \t]*\n'
+        r'[ \t]+query = args\[0\] if args else kwargs\.get\([^)]+\)[ \t]*\n'
+        r'[ \t]+return await self\.process_message\(\{[^}]+\}\)[ \t]*\n',
+        re.MULTILINE,
+    )
+
+    fixed = 0
+    for py_file in scan_files:
+        if not py_file.exists() or py_file.name in ('repair.py', 'install.py'):
+            continue
+        try:
+            src = py_file.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            continue
+
+        # Only target agents that have process_request expecting agent_outputs
+        if 'process_request' not in src or 'agent_outputs' not in src:
+            continue
+
+        m = OUR_RUN_STUB.search(src)
+        if not m:
+            continue
+
+        ind = m.group(1)
+        new_run = (
+            f"\n{ind}async def run(self, *args, **kwargs):\n"
+            f"{ind}    combined = args[0] if args else ''\n"
+            f"{ind}    query = kwargs.get('query', args[1] if len(args) > 1 else '')\n"
+            f"{ind}    return await self.process_request("
+            f"{{'agent_outputs': {{'combined': combined}}, 'query': query}})\n"
+        )
+        new_src = src[:m.start()] + new_run + src[m.end():]
+
+        if new_src != src:
+            py_file.write_text(new_src, encoding='utf-8')
+            print(f"  FIXED [synth.run   ]  {py_file}  →  run() wraps args[0] as agent_outputs")
+            fixed += 1
+
+    return fixed
+
+
 # ── Phase 10: Fix VectorSearch / type-dispatch None fallback ─────────────────
 
 def phase10_fix_vector_search_dispatch(scan_files: list) -> int:
@@ -1562,6 +1631,10 @@ def run():
     print("\n  Phase 8: Stubbing missing sub-object methods (attr.method())")
     print("  " + "─" * 52)
     total_fixed += phase8_stub_missing_attr_methods(scan_files)
+
+    print("\n  Phase 11: Fixing synthesis-style run() stubs (process_request + agent_outputs)")
+    print("  " + "─" * 52)
+    total_fixed += phase11_fix_synthesis_run_stub(scan_files)
 
     print("\n  Phase 10: Fixing type-dispatch None fallback (VectorSearch)")
     print("  " + "─" * 52)
