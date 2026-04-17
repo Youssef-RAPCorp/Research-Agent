@@ -1553,16 +1553,6 @@ def phase12_fix_method_signatures(scan_files: list) -> int:
         'insert', 'upsert', 'update', 'delete', 'embed', 'encode', 'find',
     ]
 
-    # ── Part C: missing await before stub calls ───────────────────────────────
-    # Matches:   self.x.method(   NOT preceded by 'await ' on the same line
-    MISSING_AWAIT_RE = re.compile(
-        r'(?<!\bawait\s)(?<!\bawait  )(?<!\bawait   )'   # negative lookbehind (crude)
-        r'([ \t]+)(self\.\w+\.(?:'
-        + '|'.join(TARGET_METHODS)
-        + r')\s*\()',
-        re.MULTILINE,
-    )
-
     fixed = 0
     for py_file in scan_files:
         if not py_file.exists() or py_file.name in ('repair.py', 'install.py'):
@@ -1598,23 +1588,6 @@ def phase12_fix_method_signatures(scan_files: list) -> int:
                 b_changed = True
         if b_changed:
             print(f"  FIXED [method-kwargs]  {py_file}  →  added **kwargs to storage/search methods")
-
-        # Part C — add missing await before known async stub call sites
-        # Only fix lines where the call is a plain statement (not already awaited)
-        PLAIN_CALL = re.compile(
-            r'^([ \t]+)(self\.\w+\.(?:'
-            + '|'.join(TARGET_METHODS)
-            + r')\s*\()',
-            re.MULTILINE,
-        )
-        def _add_await(m: re.Match) -> str:
-            ind  = m.group(1)
-            call = m.group(2)
-            return f'{ind}await {call}'
-        patched = PLAIN_CALL.sub(_add_await, new_src)
-        if patched != new_src:
-            new_src = patched
-            print(f"  FIXED [add-await   ]  {py_file}  →  added missing await on stub calls")
 
         if new_src != src:
             py_file.write_text(new_src, encoding='utf-8')
@@ -1856,6 +1829,32 @@ def run():
     print("\n  Phase 9: ArXiv rate-limit backoff (429/503 → sleep + empty list)")
     print("  " + "─" * 52)
     total_fixed += phase9_arxiv_rate_limit_backoff(scan_files)
+
+    print("\n  Phase 12 (pre): Removing incorrectly-added await from container method calls")
+    print("  " + "─" * 52)
+    # Phase 12C (now removed) mistakenly added 'await' before dict/list/set
+    # methods like self._tools.update({...}) which are always synchronous.
+    # This cleanup reverses that damage by removing 'await' before known
+    # container methods: update, append, extend, pop, remove, clear, add, discard.
+    _CONTAINER_METHODS = r'update|append|extend|pop|remove|clear|add|discard'
+    _WRONG_AWAIT = re.compile(
+        rf'^([ \t]+)await (self\.\w+\.(?:{_CONTAINER_METHODS})\s*\()',
+        re.MULTILINE,
+    )
+    _undo = 0
+    for _pf in all_project_py_files():
+        if not _pf.exists():
+            continue
+        try:
+            _s = _pf.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            continue
+        _new = _WRONG_AWAIT.sub(r'\1\2', _s)
+        if _new != _s:
+            _pf.write_text(_new, encoding='utf-8')
+            print(f"  FIXED [undo-await  ]  {_pf}  →  removed spurious await on container method")
+            _undo += 1
+    total_fixed += _undo
 
     print("\n  Phase 12: Fixing method signatures (async stubs + **kwargs on storage methods)")
     print("  " + "─" * 52)
