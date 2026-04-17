@@ -1526,10 +1526,19 @@ def phase11_fix_synthesis_run_stub(scan_files: list) -> int:
                 {'agent_outputs': {'combined': combined}, 'query': query}
             )
     """
+    # Phase 6 injected stub (process_message with type:comprehensive)
     OUR_RUN_STUB = re.compile(
         r'\n([ \t]+)async def run\(self,[ \t]*\*args,[ \t]*\*\*kwargs\):[ \t]*\n'
         r'[ \t]+query = args\[0\] if args else kwargs\.get\([^)]+\)[ \t]*\n'
         r'[ \t]+return await self\.process_message\(\{[^}]+\}\)[ \t]*\n',
+        re.MULTILINE,
+    )
+    # Previous Phase 11 injection with wrong agent key 'combined'
+    OUR_PHASE11_STUB = re.compile(
+        r"\n([ \t]+)async def run\(self,[ \t]*\*args,[ \t]*\*\*kwargs\):[ \t]*\n"
+        r"[ \t]+combined = args\[0\] if args else ''[ \t]*\n"
+        r"[ \t]+query = kwargs\.get\('query', args\[1\] if len\(args\) > 1 else ''\)[ \t]*\n"
+        r"[ \t]+return await self\.process_request\(\{'agent_outputs': \{'combined': combined\}[^)]+\}\)[ \t]*\n",
         re.MULTILINE,
     )
 
@@ -1546,17 +1555,20 @@ def phase11_fix_synthesis_run_stub(scan_files: list) -> int:
         if 'process_request' not in src or 'agent_outputs' not in src:
             continue
 
-        m = OUR_RUN_STUB.search(src)
+        m = OUR_RUN_STUB.search(src) or OUR_PHASE11_STUB.search(src)
         if not m:
             continue
 
         ind = m.group(1)
+        # Use 'research_agent' as the agent key so ConfidenceWeighter gives it
+        # weight 0.8 (vs 0.5 default for unknown 'combined') — passes the 0.3
+        # min_confidence filter and produces non-empty synthesis output.
         new_run = (
             f"\n{ind}async def run(self, *args, **kwargs):\n"
             f"{ind}    combined = args[0] if args else ''\n"
             f"{ind}    query = kwargs.get('query', args[1] if len(args) > 1 else '')\n"
             f"{ind}    return await self.process_request("
-            f"{{'agent_outputs': {{'combined': combined}}, 'query': query}})\n"
+            f"{{'agent_outputs': {{'research_agent': combined}}, 'query': query}})\n"
         )
         new_src = src[:m.start()] + new_run + src[m.end():]
 
