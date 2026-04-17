@@ -1056,18 +1056,26 @@ def phase6_inject_agent_run_method(scan_files: list) -> int:
 
 def phase6b_inject_process_message(scan_files: list) -> int:
     """
-    Inject async def process_message into *Agent classes that are missing it.
-    Many agents only expose broadcast_message / handle_message; this adds a
-    process_message shim so callers don't crash with AttributeError.
+    Inject async def process_message into *Agent classes that are missing it,
+    OR replace the bad broadcast_message stub injected by a previous run.
+
+    broadcast_message is intentionally excluded from the delegate list because
+    it expects (topic, payload) — two positional args — and callers pass one
+    dict.  If no suitable delegate is found, inject a safe passthrough stub
+    that returns the first positional argument (or {}) so callers don't crash.
 
     Delegation priority (first found wins):
-      broadcast_message, handle_message, receive_message,
-      synthesize, process_query, execute, analyze, process,
-      comprehensive_research
-    Note: 'run' is intentionally excluded to avoid mutual-recursion loops.
+      handle_message, receive_message, synthesize, process_query,
+      execute, analyze, process, comprehensive_research
+    Note: 'run' and 'broadcast_message' are excluded to avoid loops / arity bugs.
     """
+    # Bad stub we injected in a previous run — replace it
+    OUR_BAD_STUB = re.compile(
+        r'\n[ \t]+async def process_message\(self,[ \t]*\*args,[ \t]*\*\*kwargs\):[ \t]*\n'
+        r'[ \t]+return await self\.broadcast_message\(\*args,[ \t]*\*\*kwargs\)[ \t]*\n'
+    )
+
     DELEGATES = [
-        ('broadcast_message',     False),
         ('handle_message',        False),
         ('receive_message',       False),
         ('synthesize',            False),
@@ -1114,10 +1122,16 @@ def phase6b_inject_process_message(scan_files: list) -> int:
                 break
             body = '\n'.join(body_lines)
             ins  = last_indented_end
+            cls_body_start = cls_m.end()
 
-            if re.search(r'^[ \t]+(?:async\s+)?def process_message\s*\(', body, re.MULTILINE):
-                continue  # already has process_message
+            has_pm    = bool(re.search(r'^[ \t]+(?:async\s+)?def process_message\s*\(',
+                                       body, re.MULTILINE))
+            bad_stub_m = OUR_BAD_STUB.search(new_src, cls_body_start, ins)
 
+            if has_pm and not bad_stub_m:
+                continue  # Real process_message exists — leave it alone
+
+            # Find best delegate (skip broadcast_message — wrong arity)
             delegate = None
             for method_name, _ in DELEGATES:
                 if re.search(rf'^[ \t]+(?:async\s+)?def {re.escape(method_name)}\s*\(',
@@ -1125,20 +1139,31 @@ def phase6b_inject_process_message(scan_files: list) -> int:
                     delegate = method_name
                     break
 
-            if delegate is None:
-                continue
+            # Build stub — delegate if possible, else safe passthrough
+            if delegate:
+                is_async = bool(re.search(
+                    rf'^[ \t]+async\s+def {re.escape(delegate)}\s*\(', body, re.MULTILINE
+                ))
+                aw   = 'await ' if is_async else ''
+                body_stmt = f'return {aw}self.{delegate}(*args, **kwargs)'
+                action = f'injected → {delegate}'
+            else:
+                body_stmt = 'return args[0] if args else {}'
+                action = 'injected passthrough'
 
-            is_async = bool(re.search(
-                rf'^[ \t]+async\s+def {re.escape(delegate)}\s*\(', body, re.MULTILINE
-            ))
-            aw  = 'await ' if is_async else ''
-            stub = (
+            new_stub = (
                 f'\n    async def process_message(self, *args, **kwargs):\n'
-                f'        return {aw}self.{delegate}(*args, **kwargs)\n'
+                f'        {body_stmt}\n'
             )
-            new_src    = new_src[:ins] + stub + new_src[ins:]
+
+            if bad_stub_m:
+                new_src    = new_src[:bad_stub_m.start()] + new_stub + new_src[bad_stub_m.end():]
+                action     = f'replaced bad broadcast_message stub → {action.split("→")[-1].strip()}'
+            else:
+                new_src    = new_src[:ins] + new_stub + new_src[ins:]
+
             any_change = True
-            print(f"  FIXED [proc_msg   ]  {py_file}:{cls_name}  →  injected → {delegate}")
+            print(f"  FIXED [proc_msg   ]  {py_file}:{cls_name}  →  {action}")
 
         if any_change:
             py_file.write_text(new_src, encoding='utf-8')
@@ -1175,7 +1200,7 @@ def phase7_fix_not_started_guards(scan_files: list) -> int:
             src = py_file.read_text(encoding='utf-8', errors='replace')
         except Exception:
             continue
-        if 'not started' not in src:
+        if 'not started' not in src and 'super().start()' not in src:
             continue
 
         def _replace(m: re.Match) -> str:
@@ -1186,9 +1211,18 @@ def phase7_fix_not_started_guards(scan_files: list) -> int:
             return f'{guard_prefix}{guard_var}{colon_nl}{inner_indent}await self.start()'
 
         new_src = NOT_STARTED.sub(_replace, src)
+
+        # Also guard `await super().start()` — base class may not implement start()
+        SUPER_START = re.compile(r'([ \t]+)(await super\(\)\.start\(\))', re.MULTILINE)
+        def _guard_super(m: re.Match) -> str:
+            ind = m.group(1)
+            return (f'{ind}if hasattr(super(), "start"):  # guard: base may not implement start\n'
+                    f'{ind}    await super().start()')
+        new_src = SUPER_START.sub(_guard_super, new_src)
+
         if new_src != src:
             py_file.write_text(new_src, encoding='utf-8')
-            print(f"  FIXED [not-started ]  {py_file}  →  replaced RuntimeError guard with await self.start()")
+            print(f"  FIXED [not-started ]  {py_file}  →  auto-start + super().start() guard")
             fixed += 1
     return fixed
 
