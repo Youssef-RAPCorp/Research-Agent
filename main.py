@@ -42,9 +42,17 @@ def main():
 
     if args.overnight:
         print("Starting overnight discovery scheduler...")
+        print("Press Ctrl+C to stop.\n")
         from discovery.scheduler import DiscoveryScheduler
-        scheduler = DiscoveryScheduler()
-        asyncio.run(scheduler.start())
+        async def _run_overnight():
+            _sched = DiscoveryScheduler()
+            await _sched.start()
+            try:
+                while True:
+                    await asyncio.sleep(60)
+            except (asyncio.CancelledError, KeyboardInterrupt):
+                await _sched.stop()
+        asyncio.run(_run_overnight())
         return
 
     if not args.query:

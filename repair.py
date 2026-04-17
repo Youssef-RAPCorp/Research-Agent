@@ -2191,6 +2191,14 @@ def run():
     print("  " + "─" * 52)
     total_fixed += phase17_fix_qdrant_vector_dim(scan_files)
 
+    print("\n  Phase 18: Format orchestrator output (extract content from research dict)")
+    print("  " + "─" * 52)
+    total_fixed += phase18_fix_orchestrator_output(scan_files)
+
+    print("\n  Phase 19: Fix --overnight keep-alive (scheduler exits immediately)")
+    print("  " + "─" * 52)
+    total_fixed += phase19_fix_overnight_keepalive(scan_files)
+
     print("\n  Phase 10: Fixing type-dispatch None fallback (VectorSearch)")
     print("  " + "─" * 52)
     total_fixed += phase10_fix_vector_search_dispatch(scan_files)
@@ -2377,6 +2385,92 @@ def phase17_fix_qdrant_vector_dim(scan_files: list) -> int:
             py_file.write_text(src, encoding='utf-8')
             fixed += 1
 
+    return fixed
+
+
+# ── Phase 18: Format orchestrator output (extract content from research dict) ──
+
+def phase18_fix_orchestrator_output(scan_files: list) -> int:
+    """
+    The orchestrator appends str(research_result) to results, but research_result
+    is a dict.  Extract the human-readable content from synthesis/insights instead.
+    """
+    OLD = (
+                '                if research_result:\n'
+                '                    results.append(str(research_result))\n'
+    )
+    NEW = (
+                '                if research_result:\n'
+                '                    if isinstance(research_result, dict):\n'
+                '                        _syn = research_result.get("synthesis") or {}\n'
+                '                        _txt = (_syn.get("content", "") if isinstance(_syn, dict) else "") or ""\n'
+                '                        if not _txt:\n'
+                '                            _ins = research_result.get("insights") or {}\n'
+                '                            _kf = (_ins.get("key_findings") or []) if isinstance(_ins, dict) else []\n'
+                '                            _txt = "\\n".join(f"  * {f}" for f in _kf if f)\n'
+                '                        results.append(_txt or str(research_result))\n'
+                '                    else:\n'
+                '                        results.append(str(research_result))\n'
+    )
+    fixed = 0
+    for py_file in scan_files:
+        if not py_file.exists() or 'orchestrator' not in py_file.name:
+            continue
+        try:
+            src = py_file.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            continue
+        if OLD not in src or NEW in src:
+            continue
+        py_file.write_text(src.replace(OLD, NEW), encoding='utf-8')
+        print(f"  FIXED [orch-output  ]  {py_file}  ->  extract content from research result dict")
+        fixed += 1
+    return fixed
+
+
+# ── Phase 19: Fix --overnight keep-alive (scheduler exits immediately) ─────────
+
+def phase19_fix_overnight_keepalive(scan_files: list) -> int:
+    """
+    main.py's --overnight path calls asyncio.run(scheduler.start()) which
+    returns as soon as start() completes, killing the event loop.
+    Wrap it in a keep-alive coroutine so the scheduler runs indefinitely.
+    """
+    OLD = (
+        '    if args.overnight:\n'
+        '        print("Starting overnight discovery scheduler...")\n'
+        '        from discovery.scheduler import DiscoveryScheduler\n'
+        '        scheduler = DiscoveryScheduler()\n'
+        '        asyncio.run(scheduler.start())\n'
+        '        return\n'
+    )
+    NEW = (
+        '    if args.overnight:\n'
+        '        print("Starting overnight discovery scheduler...")\n'
+        '        print("Press Ctrl+C to stop.\\n")\n'
+        '        from discovery.scheduler import DiscoveryScheduler\n'
+        '        async def _run_overnight():\n'
+        '            _sched = DiscoveryScheduler()\n'
+        '            await _sched.start()\n'
+        '            try:\n'
+        '                while True:\n'
+        '                    await asyncio.sleep(60)\n'
+        '            except (asyncio.CancelledError, KeyboardInterrupt):\n'
+        '                await _sched.stop()\n'
+        '        asyncio.run(_run_overnight())\n'
+        '        return\n'
+    )
+    fixed = 0
+    mp = Path('main.py')
+    if mp.exists():
+        try:
+            src = mp.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            return 0
+        if OLD in src and NEW not in src:
+            mp.write_text(src.replace(OLD, NEW), encoding='utf-8')
+            print(f"  FIXED [overnight    ]  {mp}  ->  added keep-alive loop to --overnight mode")
+            fixed += 1
     return fixed
 
 
