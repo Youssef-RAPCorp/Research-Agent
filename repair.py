@@ -1357,6 +1357,58 @@ def phase8_stub_missing_attr_methods(scan_files: list) -> int:
     return fixed
 
 
+def phase9_arxiv_rate_limit_backoff(scan_files: list) -> int:
+    """
+    Replace hard `raise RuntimeError("ArXiv API error: 429/503")` with a
+    graceful back-off + empty-result return so rate-limited searches don't
+    abort the whole gather.
+
+    Pattern found in _execute_arxiv_search:
+        raise RuntimeError(f"ArXiv API error: {response.status}")
+
+    Replaced with:
+        if response.status in (429, 503):
+            await asyncio.sleep(5)   # back off before giving up
+            return []
+        raise RuntimeError(f"ArXiv API error: {response.status}")
+
+    This means 429/503 responses return empty paper lists (handled upstream
+    by the valid_results filter) rather than propagating as exceptions.
+    """
+    ARXIV_ERR = re.compile(
+        r'([ \t]+)(raise RuntimeError\(f["\']ArXiv API error: \{response\.status\}["\']\))',
+        re.MULTILINE,
+    )
+
+    fixed = 0
+    for py_file in scan_files:
+        if not py_file.exists() or py_file.name in ('repair.py', 'install.py'):
+            continue
+        try:
+            src = py_file.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            continue
+        if 'ArXiv API error' not in src:
+            continue
+
+        def _replace(m: re.Match) -> str:
+            ind = m.group(1)
+            raise_line = m.group(2)
+            return (
+                f'{ind}if response.status in (429, 503):\n'
+                f'{ind}    await asyncio.sleep(5)  # rate-limit back-off\n'
+                f'{ind}    return []\n'
+                f'{ind}{raise_line}'
+            )
+
+        new_src = ARXIV_ERR.sub(_replace, src)
+        if new_src != src:
+            py_file.write_text(new_src, encoding='utf-8')
+            print(f"  FIXED [arxiv-429   ]  {py_file}  →  graceful 429/503 back-off")
+            fixed += 1
+    return fixed
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def run():
@@ -1409,6 +1461,10 @@ def run():
     print("\n  Phase 7: Replacing 'not started' RuntimeError guards with auto-start")
     print("  " + "─" * 52)
     total_fixed += phase7_fix_not_started_guards(scan_files)
+
+    print("\n  Phase 9: ArXiv rate-limit backoff (429/503 → sleep + empty list)")
+    print("  " + "─" * 52)
+    total_fixed += phase9_arxiv_rate_limit_backoff(scan_files)
 
     print("\n  Phase 8: Stubbing missing sub-object methods (attr.method())")
     print("  " + "─" * 52)
