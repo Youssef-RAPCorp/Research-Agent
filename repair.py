@@ -671,6 +671,47 @@ _AUTO_IMPORTS = [
 ]
 
 
+def phase3_repair_broken_from_injections(scan_files: list) -> int:
+    """
+    Repair 'from X import Y' statements that were split by a previous buggy
+    Phase 3 run.
+
+    The old injection code used r'^(?:import |from )\\S+' which stopped at the
+    first word of a 'from pkg.mod import Name' line, then inserted the new
+    import right there — breaking the original statement into:
+
+        Bad:    from knowledge.embedder
+                import xml.etree.ElementTree as ET import EmbeddingModel
+
+        Fixed:  from knowledge.embedder import EmbeddingModel
+                import xml.etree.ElementTree as ET
+    """
+    # Line 1: 'from X.module'  (nothing after the module name)
+    # Line 2: 'import A [as B] import OriginalNames...'
+    BROKEN = re.compile(
+        r'^(from[ \t]+\S+)[ \t]*\n'
+        r'(import[ \t]+\S[^\n]*)[ \t]+import[ \t]+([^\n]+)$',
+        re.MULTILINE,
+    )
+
+    fixed = 0
+    for py_file in scan_files:
+        if not py_file.exists() or py_file.name in ('repair.py', 'install.py'):
+            continue
+        try:
+            src = py_file.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            continue
+        if not BROKEN.search(src):
+            continue
+        new_src = BROKEN.sub(r'\1 import \3\n\2', src)
+        if new_src != src:
+            py_file.write_text(new_src, encoding='utf-8')
+            print(f"  FIXED [from-repair ]  {py_file}  →  restored split from-import")
+            fixed += 1
+    return fixed
+
+
 def phase3_inject_missing_imports(scan_files: list) -> int:
     """Inject missing imports for known module-prefix usages (e.g. retry.Retry
     without 'from google.api_core import retry')."""
@@ -689,7 +730,9 @@ def phase3_inject_missing_imports(scan_files: list) -> int:
                 continue
             if imp in new_src:
                 continue  # exact import line already present
-            last = list(re.finditer(r'^(?:import |from )\S+', new_src, re.MULTILINE))
+            # Match the FULL import line (not just the first word) so we insert
+            # after the complete statement and never split 'from X import Y'.
+            last = list(re.finditer(r'^(?:import |from )[^\n]+', new_src, re.MULTILINE))
             if last:
                 pos = last[-1].end()
                 new_src = new_src[:pos] + f"\n{imp}" + new_src[pos:]
@@ -1697,6 +1740,10 @@ def run():
     print("\n  Phase 2: Fixing missing exports (aliases / stubs)")
     print("  " + "─" * 52)
     total_fixed += phase2_fix_imports(scan_files)
+
+    print("\n  Phase 3 (pre): Repairing any from-import lines split by previous bad injection")
+    print("  " + "─" * 52)
+    total_fixed += phase3_repair_broken_from_injections(scan_files)
 
     print("\n  Phase 3: Injecting missing auto-imports (retry, firestore, etc.)")
     print("  " + "─" * 52)
