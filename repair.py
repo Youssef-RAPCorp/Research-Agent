@@ -25,6 +25,9 @@ import sys
 import difflib
 from pathlib import Path
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 # ── Project packages ──────────────────────────────────────────────────────────
 PROJECT_PKGS = {
     "agents", "config", "knowledge", "memory",
@@ -2180,6 +2183,14 @@ def run():
     print("  " + "─" * 52)
     total_fixed += phase15_fix_insight_extraction(scan_files)
 
+    print("\n  Phase 16: qdrant-client 1.7+ API fixes (https=False + query_points)")
+    print("  " + "─" * 52)
+    total_fixed += phase16_fix_qdrant_api(scan_files)
+
+    print("\n  Phase 17: Fix Qdrant vector dimension (1536->1024) + auto-recreate on mismatch")
+    print("  " + "─" * 52)
+    total_fixed += phase17_fix_qdrant_vector_dim(scan_files)
+
     print("\n  Phase 10: Fixing type-dispatch None fallback (VectorSearch)")
     print("  " + "─" * 52)
     total_fixed += phase10_fix_vector_search_dispatch(scan_files)
@@ -2200,6 +2211,173 @@ def run():
     else:
         print("  Nothing to fix. If main.py still fails, check logs/ for details.")
     print()
+
+
+# ── Phase 16: qdrant-client 1.7+ API fixes ────────────────────────────────────
+
+def phase16_fix_qdrant_api(scan_files: list) -> int:
+    """
+    qdrant-client >= 1.7 removed QdrantClient.search() and changed the SSL
+    default.  Two targeted patches to knowledge/qdrant_store.py:
+
+      1. Add https=False to QdrantClient() so plain-HTTP Docker is used.
+      2. Replace the deprecated run_in_executor(None, self.client.search, ...)
+         pattern with a lambda calling client.query_points(...).points.
+    """
+    fixed = 0
+    for py_file in scan_files:
+        if not py_file.exists():
+            continue
+        if 'qdrant_store' not in py_file.name:
+            continue
+        try:
+            src = py_file.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            continue
+
+        changed = False
+
+        # Fix 1: inject https=False into QdrantClient() constructor if missing
+        if 'QdrantClient(' in src and 'https=False' not in src:
+            src = re.sub(
+                r'(QdrantClient\(\s*\n\s*host=self\.settings\.qdrant_host,\s*\n\s*port=self\.settings\.qdrant_port,)',
+                r'\1\n                https=False,',
+                src,
+            )
+            changed = True
+            print(f"  FIXED [qdrant-https ]  {py_file}  ->  added https=False to QdrantClient()")
+
+        # Fix 2: replace deprecated positional-arg client.search in run_in_executor
+        # Old pattern (spread over 7 lines inside run_in_executor):
+        #   None,
+        #   self.client.search,
+        #   target_collection,
+        #   query_vector,
+        #   filter_conditions,
+        #   limit,
+        #   score_threshold
+        OLD_SEARCH = (
+            r'(await asyncio\.get_event_loop\(\)\.run_in_executor\(\s*\n)'
+            r'(\s*)None,\s*\n'
+            r'\s*self\.client\.search,\s*\n'
+            r'\s*target_collection,\s*\n'
+            r'\s*query_vector,\s*\n'
+            r'\s*filter_conditions,\s*\n'
+            r'\s*limit,\s*\n'
+            r'\s*score_threshold\s*\n'
+            r'(\s*\))'
+        )
+        NEW_SEARCH = (
+            r'\1\2None,\n'
+            r'\2lambda: self.client.query_points(\n'
+            r'\2    collection_name=target_collection,\n'
+            r'\2    query=query_vector,\n'
+            r'\2    query_filter=filter_conditions,\n'
+            r'\2    limit=limit,\n'
+            r'\2    score_threshold=score_threshold,\n'
+            r'\2).points\n'
+            r'\3'
+        )
+        if 'self.client.search,' in src:
+            new_src = re.sub(OLD_SEARCH, NEW_SEARCH, src)
+            if new_src != src:
+                src = new_src
+                changed = True
+                print(f"  FIXED [qdrant-search]  {py_file}  ->  client.search -> client.query_points")
+
+        if changed:
+            py_file.write_text(src, encoding='utf-8')
+            fixed += 1
+
+    return fixed
+
+
+# ── Phase 17: Fix Qdrant vector dimension + _ensure_collection_exists ─────────
+
+def phase17_fix_qdrant_vector_dim(scan_files: list) -> int:
+    """
+    QdrantStore hardcodes _vector_size = 1536 (OpenAI) but the project uses
+    BAAI/bge-large-en-v1.5 which produces 1024-dim vectors.  Also patches
+    _ensure_collection_exists to delete + recreate the collection when the
+    stored dimension doesn't match, preventing UnexpectedResponse 400 errors.
+    """
+    fixed = 0
+    for py_file in scan_files:
+        if not py_file.exists():
+            continue
+        if 'qdrant_store' not in py_file.name:
+            continue
+        try:
+            src = py_file.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            continue
+
+        changed = False
+
+        # Fix 1: change default vector size from 1536 to 1024
+        if '_vector_size = 1536' in src:
+            src = src.replace(
+                '_vector_size = 1536  # Default for OpenAI embeddings',
+                '_vector_size = 1024  # BAAI/bge-large-en-v1.5 output dim',
+            )
+            if '_vector_size = 1024' in src:
+                changed = True
+                print(f"  FIXED [qdrant-dim   ]  {py_file}  ->  _vector_size 1536 -> 1024")
+
+        # Fix 2: patch _ensure_collection_exists to recreate on dim mismatch
+        OLD_ENSURE = (
+            '            if self.collection_name not in collection_names:\n'
+            '                await asyncio.get_event_loop().run_in_executor(\n'
+            '                    None,\n'
+            '                    self.client.create_collection,\n'
+            '                    self.collection_name,\n'
+            '                    VectorParams(size=self._vector_size, distance=Distance.COSINE)\n'
+            '                )\n'
+            '                self.logger.info(f"Created collection: {self.collection_name}")'
+        )
+        NEW_ENSURE = (
+            '            if self.collection_name not in collection_names:\n'
+            '                await asyncio.get_event_loop().run_in_executor(\n'
+            '                    None,\n'
+            '                    self.client.create_collection,\n'
+            '                    self.collection_name,\n'
+            '                    VectorParams(size=self._vector_size, distance=Distance.COSINE)\n'
+            '                )\n'
+            '                self.logger.info(f"Created collection: {self.collection_name}")\n'
+            '            else:\n'
+            '                # Recreate if stored dimension doesn\'t match expected\n'
+            '                try:\n'
+            '                    info = await asyncio.get_event_loop().run_in_executor(\n'
+            '                        None, self.client.get_collection, self.collection_name\n'
+            '                    )\n'
+            '                    stored_dim = info.config.params.vectors.size\n'
+            '                    if stored_dim != self._vector_size:\n'
+            '                        await asyncio.get_event_loop().run_in_executor(\n'
+            '                            None, self.client.delete_collection, self.collection_name\n'
+            '                        )\n'
+            '                        await asyncio.get_event_loop().run_in_executor(\n'
+            '                            None,\n'
+            '                            self.client.create_collection,\n'
+            '                            self.collection_name,\n'
+            '                            VectorParams(size=self._vector_size, distance=Distance.COSINE)\n'
+            '                        )\n'
+            '                        self.logger.info(\n'
+            '                            f"Recreated collection {self.collection_name}: "\n'
+            '                            f"dim {stored_dim} -> {self._vector_size}"\n'
+            '                        )\n'
+            '                except Exception:\n'
+            '                    pass'
+        )
+        if OLD_ENSURE in src and NEW_ENSURE not in src:
+            src = src.replace(OLD_ENSURE, NEW_ENSURE)
+            changed = True
+            print(f"  FIXED [qdrant-recreate]  {py_file}  ->  auto-recreate collection on dim mismatch")
+
+        if changed:
+            py_file.write_text(src, encoding='utf-8')
+            fixed += 1
+
+    return fixed
 
 
 if __name__ == "__main__":
