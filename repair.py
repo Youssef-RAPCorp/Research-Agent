@@ -2412,6 +2412,16 @@ def phase18_fix_orchestrator_output(scan_files: list) -> int:
                 '                    else:\n'
                 '                        results.append(str(research_result))\n'
     )
+    # Also fix synthesis result: return str(final) -> extract content field
+    OLD2 = '                    if final:\n                        return str(final)\n'
+    NEW2 = (
+        '                    if final:\n'
+        '                        if isinstance(final, dict):\n'
+        '                            _fc = final.get("content", "") or ""\n'
+        '                            return _fc if _fc else str(final)\n'
+        '                        return str(final)\n'
+    )
+
     fixed = 0
     for py_file in scan_files:
         if not py_file.exists() or 'orchestrator' not in py_file.name:
@@ -2420,11 +2430,18 @@ def phase18_fix_orchestrator_output(scan_files: list) -> int:
             src = py_file.read_text(encoding='utf-8', errors='replace')
         except Exception:
             continue
-        if OLD not in src or NEW in src:
-            continue
-        py_file.write_text(src.replace(OLD, NEW), encoding='utf-8')
-        print(f"  FIXED [orch-output  ]  {py_file}  ->  extract content from research result dict")
-        fixed += 1
+        changed = False
+        if OLD in src and NEW not in src:
+            src = src.replace(OLD, NEW)
+            changed = True
+            print(f"  FIXED [orch-output  ]  {py_file}  ->  extract content from research result dict")
+        if OLD2 in src and NEW2 not in src:
+            src = src.replace(OLD2, NEW2)
+            changed = True
+            print(f"  FIXED [orch-synth   ]  {py_file}  ->  extract content from synthesis result dict")
+        if changed:
+            py_file.write_text(src, encoding='utf-8')
+            fixed += 1
     return fixed
 
 

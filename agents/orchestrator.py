@@ -100,6 +100,9 @@ class PhysicsOrchestrator:
                     else:
                         final = synthesis_agent.run(combined, query=query)
                     if final:
+                        if isinstance(final, dict):
+                            _fc = final.get("content", "") or ""
+                            return _fc if _fc else str(final)
                         return str(final)
                 except Exception as exc:
                     logger.error(f"Synthesis agent error: {exc}", exc_info=True)
