@@ -730,6 +730,63 @@ def phase4_fix_init_params(scan_files: list) -> int:
     return fixed
 
 
+def _class_body_and_ins(src: str, cls_m: re.Match) -> tuple:
+    """
+    Return (body_str, ins_pos) for a class definition match.
+
+    Walks line-by-line from right after the class header colon.  Handles
+    multi-line triple-quoted strings (docstrings, f-string templates) whose
+    closing delimiter may be at column-0 — the extractor continues past such
+    lines instead of stopping prematurely, preventing code injection inside
+    string literals.
+    """
+    body_lines: list = []
+    last_indented_end = cls_m.end()
+    scan_pos = cls_m.end()
+
+    # skip to end of the class definition line
+    nl = src.find('\n', scan_pos)
+    scan_pos = (nl + 1) if nl != -1 else len(src)
+
+    in_triple  = False
+    triple_ch  = None
+
+    while scan_pos < len(src):
+        nl       = src.find('\n', scan_pos)
+        line_end = nl if nl != -1 else len(src)
+        line     = src[scan_pos:line_end]
+
+        if in_triple:
+            # We're inside a multi-line string — consume unconditionally
+            body_lines.append(line)
+            if triple_ch in line:
+                in_triple = False
+                last_indented_end = line_end + 1   # injection goes after the closing quote
+            scan_pos = line_end + 1
+            continue
+
+        if not line.strip():
+            body_lines.append(line)
+            scan_pos = line_end + 1
+            continue
+
+        if line[:1] not in (' ', '\t'):
+            break   # un-indented non-blank → end of class body
+
+        # Check whether this line opens an unclosed triple-quote
+        for tq in ('"""', "'''"):
+            if line.count(tq) % 2 == 1:   # odd occurrences → opens a block
+                in_triple = True
+                triple_ch = tq
+                break
+
+        body_lines.append(line)
+        last_indented_end = line_end + 1
+        scan_pos = line_end + 1
+
+    return '\n'.join(body_lines), last_indented_end
+
+
 # ── Phase 5: Implement missing abstract methods ───────────────────────────────
 
 def _collect_abstract_methods(scan_files: list) -> dict:
@@ -874,33 +931,7 @@ def phase5_fix_abstract_methods(scan_files: list) -> int:
             if not required:
                 continue
 
-            # ── Proper indentation-based class body extraction ────────────
-            # Walk line-by-line from right after the class definition colon.
-            # Only lines that start with 4+ spaces (or a tab) belong to the
-            # class body.  This is intentionally strict so we don't mistake
-            # module-level stubs (from a previous bad run) as class methods.
-            body_lines: list = []
-            last_indented_end = cls_m.end()   # fallback insert = right after class line
-            scan_pos = cls_m.end()
-            # skip to end of the class definition line
-            nl = new_src.find('\n', scan_pos)
-            scan_pos = (nl + 1) if nl != -1 else len(new_src)
-            while scan_pos < len(new_src):
-                nl = new_src.find('\n', scan_pos)
-                line_end = nl if nl != -1 else len(new_src)
-                line     = new_src[scan_pos:line_end]
-                if not line.strip():                          # blank line — keep tentatively
-                    body_lines.append(line)
-                    scan_pos = line_end + 1
-                    continue
-                if line[:1] in (' ', '\t'):                   # indented — class member
-                    body_lines.append(line)
-                    last_indented_end = line_end + 1          # char after this line's \n
-                    scan_pos = line_end + 1
-                    continue
-                break                                         # un-indented non-blank = end
-            body = '\n'.join(body_lines)
-            ins  = last_indented_end                          # insert after last real member
+            body, ins = _class_body_and_ins(new_src, cls_m)
 
             stubs_added: list = []
             for method_name, is_async in required:
@@ -982,25 +1013,7 @@ def phase6_inject_agent_run_method(scan_files: list) -> int:
         for cls_m in reversed(class_matches):
             cls_name = cls_m.group(1).split('(')[0].strip()
 
-            # Indentation-based body extraction
-            body_lines: list = []
-            last_indented_end = cls_m.end()
-            scan_pos = cls_m.end()
-            nl = new_src.find('\n', scan_pos)
-            scan_pos = (nl + 1) if nl != -1 else len(new_src)
-            while scan_pos < len(new_src):
-                nl = new_src.find('\n', scan_pos)
-                line_end = nl if nl != -1 else len(new_src)
-                line = new_src[scan_pos:line_end]
-                if not line.strip():
-                    body_lines.append(line); scan_pos = line_end + 1; continue
-                if line[:1] in (' ', '\t'):
-                    body_lines.append(line)
-                    last_indented_end = line_end + 1
-                    scan_pos = line_end + 1; continue
-                break
-            body = '\n'.join(body_lines)
-            ins = last_indented_end
+            body, ins = _class_body_and_ins(new_src, cls_m)
             cls_body_start = cls_m.end()
 
             has_run    = bool(re.search(r'^[ \t]+(?:async\s+)?def run\s*\(', body, re.MULTILINE))
@@ -1072,7 +1085,9 @@ def phase6b_inject_process_message(scan_files: list) -> int:
     # Bad stub we injected in a previous run — replace it
     OUR_BAD_STUB = re.compile(
         r'\n[ \t]+async def process_message\(self,[ \t]*\*args,[ \t]*\*\*kwargs\):[ \t]*\n'
-        r'[ \t]+return await self\.broadcast_message\(\*args,[ \t]*\*\*kwargs\)[ \t]*\n'
+        r'[ \t]+return (?:await self\.broadcast_message\(\*args,[ \t]*\*\*kwargs\)'
+        r'|args\[0\] if args else (?:\{\}|dict\(\)))'
+        r'[ \t]*\n'
     )
 
     DELEGATES = [
@@ -1104,24 +1119,7 @@ def phase6b_inject_process_message(scan_files: list) -> int:
         for cls_m in reversed(class_matches):
             cls_name = cls_m.group(1).split('(')[0].strip()
 
-            body_lines: list = []
-            last_indented_end = cls_m.end()
-            scan_pos = cls_m.end()
-            nl = new_src.find('\n', scan_pos)
-            scan_pos = (nl + 1) if nl != -1 else len(new_src)
-            while scan_pos < len(new_src):
-                nl       = new_src.find('\n', scan_pos)
-                line_end = nl if nl != -1 else len(new_src)
-                line     = new_src[scan_pos:line_end]
-                if not line.strip():
-                    body_lines.append(line); scan_pos = line_end + 1; continue
-                if line[:1] in (' ', '\t'):
-                    body_lines.append(line)
-                    last_indented_end = line_end + 1
-                    scan_pos = line_end + 1; continue
-                break
-            body = '\n'.join(body_lines)
-            ins  = last_indented_end
+            body, ins = _class_body_and_ins(new_src, cls_m)
             cls_body_start = cls_m.end()
 
             has_pm    = bool(re.search(r'^[ \t]+(?:async\s+)?def process_message\s*\(',
@@ -1148,7 +1146,7 @@ def phase6b_inject_process_message(scan_files: list) -> int:
                 body_stmt = f'return {aw}self.{delegate}(*args, **kwargs)'
                 action = f'injected → {delegate}'
             else:
-                body_stmt = 'return args[0] if args else {}'
+                body_stmt = 'return args[0] if args else dict()'
                 action = 'injected passthrough'
 
             new_stub = (
