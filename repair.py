@@ -1456,6 +1456,66 @@ def phase9_arxiv_rate_limit_backoff(scan_files: list) -> int:
 
 # ── Phase 12: Fix method signature / async stub issues ───────────────────────
 
+def _add_kwargs_to_method(src: str, method_name: str) -> tuple:
+    """
+    Find every 'def method_name(' (sync or async) in src and add **kwargs
+    to the parameter list if not already present.
+
+    Uses paren-balancing rather than a single-line regex so multi-line
+    signatures (common in typed Python) are handled correctly.
+
+    Returns (new_src, changed_bool).
+    """
+    pat = re.compile(
+        rf'^[ \t]+(?:async\s+)?def {re.escape(method_name)}\s*\(',
+        re.MULTILINE,
+    )
+    positions = [m.start() for m in pat.finditer(src)]
+    if not positions:
+        return src, False
+
+    changed = False
+    # Process in reverse so earlier offsets stay valid after insertions
+    for mstart in reversed(positions):
+        # Find the opening '('
+        open_paren = src.index('(', mstart)
+        # Balance parens to find the closing ')'
+        depth, i = 0, open_paren
+        while i < len(src):
+            if src[i] == '(':
+                depth += 1
+            elif src[i] == ')':
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        close_paren = i
+
+        params_str = src[open_paren + 1:close_paren]
+        if '**' in params_str:
+            continue  # already absorbs extra kwargs
+
+        # Find insertion point: just before the closing ')', stripping
+        # any trailing comma/whitespace so we get clean formatting
+        ins = close_paren
+        j = ins - 1
+        while j > open_paren and src[j] in ' \t\n':
+            j -= 1
+        # Decide separator
+        if j == open_paren:          # empty params — e.g. def f():
+            sep = ''
+        elif src[j] == ',':          # trailing comma already present
+            sep = ' '
+            ins = j + 1              # insert after the existing comma
+        else:
+            sep = ', '               # add comma before **kwargs
+
+        src = src[:ins] + sep + '**kwargs' + src[ins:]
+        changed = True
+
+    return src, changed
+
+
 def phase12_fix_method_signatures(scan_files: list) -> int:
     """
     Two-part fix for method-level issues that Phase 4 (init-only) doesn't cover:
@@ -1470,10 +1530,15 @@ def phase12_fix_method_signatures(scan_files: list) -> int:
 
     Part B — Add **kwargs to storage/search method signatures:
         Callers pass keyword args (e.g. vector=, top_k=, filters=) that the
-        real method signature doesn't declare, causing TypeError.  Adding
-        **kwargs absorbs unknown keys so the method no longer crashes.
+        real method signature doesn't declare, causing TypeError.  Uses
+        paren-balancing so multi-line signatures are handled correctly.
         Targets: search, query, similarity_search, vector_search, retrieve,
         store, store_context, get_context, insert, upsert, embed, encode, find.
+
+    Part C — Add missing await before calls to async stubs:
+        When Phase 12A upgraded a stub to async def, any call site that does
+        NOT use await will get a "coroutine was never awaited" RuntimeWarning.
+        Finds 'self.x.method(...)' calls (without await) and adds await.
     """
     # ── Part A: sync stub → async ─────────────────────────────────────────────
     SYNC_STUB = re.compile(
@@ -1482,17 +1547,19 @@ def phase12_fix_method_signatures(scan_files: list) -> int:
         re.MULTILINE,
     )
 
-    # ── Part B: add **kwargs to fixed-signature methods ───────────────────────
-    TARGET_METHODS = {
+    TARGET_METHODS = [
         'search', 'query', 'similarity_search', 'vector_search',
         'retrieve', 'store', 'store_context', 'get_context',
         'insert', 'upsert', 'update', 'delete', 'embed', 'encode', 'find',
-    }
-    # Matches:  def method(self, params):  or  async def method(self, params):
-    # where params does NOT already contain **
-    METHOD_RE = re.compile(
-        r'^([ \t]+(?:async\s+)?def (' + '|'.join(TARGET_METHODS) + r')\(self)([^)]*)\)'
-        r'([ \t]*(?:->[^:]+)?[ \t]*:)',
+    ]
+
+    # ── Part C: missing await before stub calls ───────────────────────────────
+    # Matches:   self.x.method(   NOT preceded by 'await ' on the same line
+    MISSING_AWAIT_RE = re.compile(
+        r'(?<!\bawait\s)(?<!\bawait  )(?<!\bawait   )'   # negative lookbehind (crude)
+        r'([ \t]+)(self\.\w+\.(?:'
+        + '|'.join(TARGET_METHODS)
+        + r')\s*\()',
         re.MULTILINE,
     )
 
@@ -1509,7 +1576,7 @@ def phase12_fix_method_signatures(scan_files: list) -> int:
 
         # Part A
         def _make_async(m: re.Match) -> str:
-            ind        = m.group(1)
+            ind         = m.group(1)
             method_name = m.group(2)
             return (
                 f'\n{ind}async def {method_name}(self, *args, **kwargs):\n'
@@ -1521,20 +1588,33 @@ def phase12_fix_method_signatures(scan_files: list) -> int:
             new_src = patched
             print(f"  FIXED [async-stub  ]  {py_file}  →  sync stubs → async def")
 
-        # Part B
-        def _add_kwargs(m: re.Match) -> str:
-            prefix   = m.group(1)   # '    def search(self'
-            params   = m.group(3)   # ', query, top_k=10'
-            suffix   = m.group(4)   # '    -> ...: '
-            if '**' in params:
-                return m.group(0)   # already has **kwargs
-            sep = ', ' if params.strip() else ''
-            return f"{prefix}{params}{sep}**kwargs){suffix}"
+        # Part B — paren-balancing approach handles single- and multi-line sigs
+        b_changed = False
+        for mname in TARGET_METHODS:
+            if f'def {mname}' not in new_src:
+                continue
+            new_src, chg = _add_kwargs_to_method(new_src, mname)
+            if chg:
+                b_changed = True
+        if b_changed:
+            print(f"  FIXED [method-kwargs]  {py_file}  →  added **kwargs to storage/search methods")
 
-        patched = METHOD_RE.sub(_add_kwargs, new_src)
+        # Part C — add missing await before known async stub call sites
+        # Only fix lines where the call is a plain statement (not already awaited)
+        PLAIN_CALL = re.compile(
+            r'^([ \t]+)(self\.\w+\.(?:'
+            + '|'.join(TARGET_METHODS)
+            + r')\s*\()',
+            re.MULTILINE,
+        )
+        def _add_await(m: re.Match) -> str:
+            ind  = m.group(1)
+            call = m.group(2)
+            return f'{ind}await {call}'
+        patched = PLAIN_CALL.sub(_add_await, new_src)
         if patched != new_src:
             new_src = patched
-            print(f"  FIXED [method-kwargs]  {py_file}  →  added **kwargs to storage/search methods")
+            print(f"  FIXED [add-await   ]  {py_file}  →  added missing await on stub calls")
 
         if new_src != src:
             py_file.write_text(new_src, encoding='utf-8')
