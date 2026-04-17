@@ -1459,25 +1459,27 @@ def phase9_arxiv_rate_limit_backoff(scan_files: list) -> int:
 def phase14_fix_qdrant_client_init(scan_files: list) -> int:
     """
     QdrantStore.__init__ ends up with self.client = None when no Qdrant server
-    is running (Phase 4 made host/port optional=None, so QdrantClient(None, None)
-    either fails or never gets called).
+    is running.  Three independent patterns — each applied only if not already
+    present — so re-running is safe even if earlier runs partially patched:
 
-    Patch qdrant-related files so they:
-      A) Fall back to in-memory QdrantClient when the server isn't reachable
-         (self.client = QdrantClient(...) wrapped in try/except)
-      B) Replace bare 'self.client = None' with the same try/except initializer
-
-    In-memory mode keeps everything working (returns empty search results but no
-    crashes) without requiring a running Qdrant server or Docker.
+      A) Wrap  self.client = QdrantClient(...)  in try/except with :memory: fallback
+      B) Replace bare  self.client = None  with try/except initializer
+      C) Add  if self.client is None: return []  at the top of search() so a
+         None client never raises AttributeError regardless of how __init__ ran.
     """
-    # Pattern A: direct construction  self.client = QdrantClient(...)
+    # Pattern A
     QDRANT_INIT_RE = re.compile(
         r'^([ \t]+)(self\.client\s*=\s*QdrantClient\([^)\n]*\))',
         re.MULTILINE,
     )
-    # Pattern B: bare None assignment  self.client = None
+    # Pattern B
     CLIENT_NONE_RE = re.compile(
         r'^([ \t]+)(self\.client\s*=\s*None)\b',
+        re.MULTILINE,
+    )
+    # Pattern C — the def search(self...) signature line
+    SEARCH_DEF_RE = re.compile(
+        r'^([ \t]+)((?:async\s+)?def search\(self[^)]*\):[ \t]*\n)',
         re.MULTILINE,
     )
 
@@ -1485,7 +1487,6 @@ def phase14_fix_qdrant_client_init(scan_files: list) -> int:
     for py_file in scan_files:
         if not py_file.exists():
             continue
-        # Only touch qdrant-related files
         path_lower = str(py_file).lower()
         if 'qdrant' not in path_lower and 'vector_store' not in path_lower:
             continue
@@ -1495,47 +1496,60 @@ def phase14_fix_qdrant_client_init(scan_files: list) -> int:
             continue
         if 'QdrantClient' not in src:
             continue
-        # Skip if already patched
-        if '":memory:"' in src or "':memory:'" in src:
-            continue
 
         new_src = src
 
-        # Pattern A — wrap existing QdrantClient(...)
-        def _wrap_init(m: re.Match) -> str:
-            ind  = m.group(1)
-            orig = m.group(2)
-            return (
-                f'{ind}try:\n'
-                f'{ind}    {orig}\n'
-                f'{ind}except Exception:\n'
-                f'{ind}    from qdrant_client import QdrantClient\n'
-                f'{ind}    self.client = QdrantClient(":memory:")  # server unavailable'
-            )
-        patched = QDRANT_INIT_RE.sub(_wrap_init, new_src)
-        if patched != new_src:
-            new_src = patched
+        # Patterns A & B — only when :memory: fallback not yet present
+        already_mem = '":memory:"' in src or "':memory:'" in src
+        if not already_mem:
+            def _wrap_init(m: re.Match) -> str:
+                ind  = m.group(1)
+                orig = m.group(2)
+                return (
+                    f'{ind}try:\n'
+                    f'{ind}    {orig}\n'
+                    f'{ind}except Exception:\n'
+                    f'{ind}    from qdrant_client import QdrantClient\n'
+                    f'{ind}    self.client = QdrantClient(":memory:")  # server unavailable'
+                )
+            patched = QDRANT_INIT_RE.sub(_wrap_init, new_src)
+            if patched != new_src:
+                new_src = patched
 
-        # Pattern B — replace bare None with try/except initializer
-        def _replace_none(m: re.Match) -> str:
-            ind = m.group(1)
-            return (
-                f'{ind}try:\n'
-                f'{ind}    from qdrant_client import QdrantClient as _QC\n'
-                f'{ind}    _h = getattr(self, "host", None) or "localhost"\n'
-                f'{ind}    _p = int(getattr(self, "port", None) or 6333)\n'
-                f'{ind}    self.client = _QC(host=_h, port=_p)\n'
-                f'{ind}except Exception:\n'
-                f'{ind}    from qdrant_client import QdrantClient as _QC\n'
-                f'{ind}    self.client = _QC(":memory:")  # server unavailable'
-            )
-        patched = CLIENT_NONE_RE.sub(_replace_none, new_src)
-        if patched != new_src:
-            new_src = patched
+            def _replace_none(m: re.Match) -> str:
+                ind = m.group(1)
+                return (
+                    f'{ind}try:\n'
+                    f'{ind}    from qdrant_client import QdrantClient as _QC\n'
+                    f'{ind}    _h = getattr(self, "host", None) or "localhost"\n'
+                    f'{ind}    _p = int(getattr(self, "port", None) or 6333)\n'
+                    f'{ind}    self.client = _QC(host=_h, port=_p)\n'
+                    f'{ind}except Exception:\n'
+                    f'{ind}    from qdrant_client import QdrantClient as _QC\n'
+                    f'{ind}    self.client = _QC(":memory:")  # server unavailable'
+                )
+            patched = CLIENT_NONE_RE.sub(_replace_none, new_src)
+            if patched != new_src:
+                new_src = patched
+
+        # Pattern C — add None guard at top of search(); independent of A/B
+        if 'if self.client is None:' not in new_src:
+            def _add_search_guard(m: re.Match) -> str:
+                ind     = m.group(1)
+                sig     = m.group(2)
+                body_ind = ind + '    '
+                return (
+                    f'{ind}{sig}'
+                    f'{body_ind}if self.client is None:\n'
+                    f'{body_ind}    return []\n'
+                )
+            patched = SEARCH_DEF_RE.sub(_add_search_guard, new_src)
+            if patched != new_src:
+                new_src = patched
 
         if new_src != src:
             py_file.write_text(new_src, encoding='utf-8')
-            print(f"  FIXED [qdrant-mem  ]  {py_file}  →  in-memory fallback added")
+            print(f"  FIXED [qdrant-mem  ]  {py_file}  →  None guard + in-memory fallback")
             fixed += 1
 
     return fixed
