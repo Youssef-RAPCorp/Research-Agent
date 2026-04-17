@@ -1054,6 +1054,145 @@ def phase6_inject_agent_run_method(scan_files: list) -> int:
     return fixed
 
 
+def phase6b_inject_process_message(scan_files: list) -> int:
+    """
+    Inject async def process_message into *Agent classes that are missing it.
+    Many agents only expose broadcast_message / handle_message; this adds a
+    process_message shim so callers don't crash with AttributeError.
+
+    Delegation priority (first found wins):
+      broadcast_message, handle_message, receive_message,
+      synthesize, process_query, execute, analyze, process,
+      comprehensive_research
+    Note: 'run' is intentionally excluded to avoid mutual-recursion loops.
+    """
+    DELEGATES = [
+        ('broadcast_message',     False),
+        ('handle_message',        False),
+        ('receive_message',       False),
+        ('synthesize',            False),
+        ('process_query',         False),
+        ('execute',               False),
+        ('analyze',               False),
+        ('process',               False),
+        ('comprehensive_research', False),
+    ]
+
+    fixed = 0
+    for py_file in scan_files:
+        if not py_file.exists() or py_file.name in ('repair.py', 'install.py'):
+            continue
+        try:
+            src = py_file.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            continue
+        if not re.search(r'^class \w*Agent\b', src, re.MULTILINE):
+            continue
+
+        new_src    = src
+        any_change = False
+
+        class_matches = list(re.finditer(r'^class (\w*Agent\b[^:]*)\s*:', new_src, re.MULTILINE))
+        for cls_m in reversed(class_matches):
+            cls_name = cls_m.group(1).split('(')[0].strip()
+
+            body_lines: list = []
+            last_indented_end = cls_m.end()
+            scan_pos = cls_m.end()
+            nl = new_src.find('\n', scan_pos)
+            scan_pos = (nl + 1) if nl != -1 else len(new_src)
+            while scan_pos < len(new_src):
+                nl       = new_src.find('\n', scan_pos)
+                line_end = nl if nl != -1 else len(new_src)
+                line     = new_src[scan_pos:line_end]
+                if not line.strip():
+                    body_lines.append(line); scan_pos = line_end + 1; continue
+                if line[:1] in (' ', '\t'):
+                    body_lines.append(line)
+                    last_indented_end = line_end + 1
+                    scan_pos = line_end + 1; continue
+                break
+            body = '\n'.join(body_lines)
+            ins  = last_indented_end
+
+            if re.search(r'^[ \t]+(?:async\s+)?def process_message\s*\(', body, re.MULTILINE):
+                continue  # already has process_message
+
+            delegate = None
+            for method_name, _ in DELEGATES:
+                if re.search(rf'^[ \t]+(?:async\s+)?def {re.escape(method_name)}\s*\(',
+                             body, re.MULTILINE):
+                    delegate = method_name
+                    break
+
+            if delegate is None:
+                continue
+
+            is_async = bool(re.search(
+                rf'^[ \t]+async\s+def {re.escape(delegate)}\s*\(', body, re.MULTILINE
+            ))
+            aw  = 'await ' if is_async else ''
+            stub = (
+                f'\n    async def process_message(self, *args, **kwargs):\n'
+                f'        return {aw}self.{delegate}(*args, **kwargs)\n'
+            )
+            new_src    = new_src[:ins] + stub + new_src[ins:]
+            any_change = True
+            print(f"  FIXED [proc_msg   ]  {py_file}:{cls_name}  →  injected → {delegate}")
+
+        if any_change:
+            py_file.write_text(new_src, encoding='utf-8')
+            fixed += 1
+    return fixed
+
+
+def phase7_fix_not_started_guards(scan_files: list) -> int:
+    """
+    Replace `raise RuntimeError("... not started")` guards with lazy auto-start.
+
+    Pattern detected:
+        if not self.<flag>:
+            raise RuntimeError("... not started")
+
+    Replaced with:
+        if not self.<flag>:
+            await self.start()
+
+    This converts hard failures into lazy initialization so agents that require
+    an explicit .start() call work correctly when used without it.
+    """
+    NOT_STARTED = re.compile(
+        r'([ \t]+if not )(self\.\w+)(:\s*\n)'
+        r'([ \t]+)raise RuntimeError\(["\'][^"\']*not started[^"\']*["\']\)',
+        re.MULTILINE,
+    )
+
+    fixed = 0
+    for py_file in scan_files:
+        if not py_file.exists() or py_file.name in ('repair.py', 'install.py'):
+            continue
+        try:
+            src = py_file.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            continue
+        if 'not started' not in src:
+            continue
+
+        def _replace(m: re.Match) -> str:
+            guard_prefix = m.group(1)   # '        if not '
+            guard_var    = m.group(2)   # 'self._started'
+            colon_nl     = m.group(3)   # ':\n'
+            inner_indent = m.group(4)   # '            '
+            return f'{guard_prefix}{guard_var}{colon_nl}{inner_indent}await self.start()'
+
+        new_src = NOT_STARTED.sub(_replace, src)
+        if new_src != src:
+            py_file.write_text(new_src, encoding='utf-8')
+            print(f"  FIXED [not-started ]  {py_file}  →  replaced RuntimeError guard with await self.start()")
+            fixed += 1
+    return fixed
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def run():
@@ -1098,6 +1237,14 @@ def run():
     print("\n  Phase 6: Injecting async def run() into Agent classes")
     print("  " + "─" * 52)
     total_fixed += phase6_inject_agent_run_method(scan_files)
+
+    print("\n  Phase 6b: Injecting process_message() into Agent classes")
+    print("  " + "─" * 52)
+    total_fixed += phase6b_inject_process_message(scan_files)
+
+    print("\n  Phase 7: Replacing 'not started' RuntimeError guards with auto-start")
+    print("  " + "─" * 52)
+    total_fixed += phase7_fix_not_started_guards(scan_files)
 
     # Second pass of Phase 2 — earlier phases may expose new import mismatches
     print("\n  Phase 2 (second pass)")
