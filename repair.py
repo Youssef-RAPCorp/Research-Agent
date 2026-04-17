@@ -1225,6 +1225,138 @@ def phase7_fix_not_started_guards(scan_files: list) -> int:
     return fixed
 
 
+def phase8_stub_missing_attr_methods(scan_files: list) -> int:
+    """
+    Cross-reference self.attr.method() call sites against the attr's class
+    definition.  For any (ClassName, method_name) pair where method_name is
+    absent from ClassName, inject a safe stub so AttributeErrors don't abort
+    the pipeline at runtime.
+
+    Algorithm
+    ---------
+    1. Build a project-wide {ClassName → file} index.
+    2. For each class in the project:
+       a. Parse __init__ for  self.X = ClassName(...)  →  attr_map[X] = ClassName
+       b. Scan the class body for  self.X.method(  call-sites.
+       c. For each (ClassName, method) pair, check if method exists.
+       d. If not, record it as missing.
+    3. Write stubs in batches per file (reversed order = safe insertion).
+
+    Stubs use `def` (not `async def`) with `return dict()` so callers that do
+    `.get(...)` on the result don't crash.  Methods with a leading underscore
+    are skipped (internal helpers, magic methods).
+    """
+    # ── Step 1: class → file index ────────────────────────────────────────────
+    class_file: dict = {}
+    for py_file in scan_files:
+        if not py_file.exists():
+            continue
+        try:
+            src = py_file.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            continue
+        for m in re.finditer(r'^class (\w+)\b', src, re.MULTILINE):
+            cls = m.group(1)
+            if cls not in class_file:
+                class_file[cls] = py_file
+
+    # ── Step 2: collect missing (target_file → {class → {methods}}) ──────────
+    missing: dict = {}   # {str(target_file): {class_name: set(method_names)}}
+
+    ASSIGN_RE = re.compile(
+        r'self\.(\w+)\s*=\s*(?:\w+\s+or\s+)?([A-Z]\w*)\s*\('
+    )
+    CALL_RE = re.compile(r'\bself\.(\w+)\.([a-z]\w*)\s*\(')
+
+    for py_file in scan_files:
+        if not py_file.exists() or py_file.name in ('repair.py', 'install.py'):
+            continue
+        try:
+            src = py_file.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            continue
+
+        for cls_m in re.finditer(r'^class (\w+)[^:]*:', src, re.MULTILINE):
+            body_str, _ = _class_body_and_ins(src, cls_m)
+
+            # Build attr → ClassName from __init__ assignments
+            attr_map: dict = {}
+            for am in ASSIGN_RE.finditer(body_str):
+                attr_map[am.group(1)] = am.group(2)
+            if not attr_map:
+                continue
+
+            # Find all call sites and check for missing methods
+            seen = set()
+            for cm in CALL_RE.finditer(body_str):
+                attr_name   = cm.group(1)
+                method_name = cm.group(2)
+                if attr_name not in attr_map or method_name.startswith('_'):
+                    continue
+                target_cls = attr_map[attr_name]
+                if target_cls not in class_file:
+                    continue
+                key = (target_cls, method_name)
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                target_file = class_file[target_cls]
+                try:
+                    target_src = target_file.read_text(encoding='utf-8', errors='replace')
+                except Exception:
+                    continue
+
+                tcls_m = re.search(
+                    rf'^class {re.escape(target_cls)}\b[^:]*:', target_src, re.MULTILINE
+                )
+                if not tcls_m:
+                    continue
+
+                tbody, _ = _class_body_and_ins(target_src, tcls_m)
+                if re.search(
+                    rf'^[ \t]+(?:async\s+)?def {re.escape(method_name)}\s*\(',
+                    tbody, re.MULTILINE,
+                ):
+                    continue  # already implemented
+
+                fk = str(target_file)
+                missing.setdefault(fk, {}).setdefault(target_cls, set()).add(method_name)
+
+    # ── Step 3: write stubs in reverse-class order per file ──────────────────
+    fixed = 0
+    for file_path_str, cls_methods in missing.items():
+        from pathlib import Path as _P
+        target_file = _P(file_path_str)
+        try:
+            new_src = target_file.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            continue
+
+        any_change = False
+        class_matches = list(re.finditer(r'^class (\w+)[^:]*:', new_src, re.MULTILINE))
+        for tcls_m in reversed(class_matches):
+            cls_name = tcls_m.group(1)
+            if cls_name not in cls_methods:
+                continue
+
+            _, ins = _class_body_and_ins(new_src, tcls_m)
+            for method_name in sorted(cls_methods[cls_name]):
+                stub = (
+                    f'\n    def {method_name}(self, *args, **kwargs):\n'
+                    f'        return dict()\n'
+                )
+                new_src    = new_src[:ins] + stub + new_src[ins:]
+                ins       += len(stub)
+                any_change = True
+                print(f"  FIXED [attr.method ]  {target_file}:{cls_name}.{method_name}()")
+
+        if any_change:
+            target_file.write_text(new_src, encoding='utf-8')
+            fixed += 1
+    return fixed
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def run():
@@ -1277,6 +1409,10 @@ def run():
     print("\n  Phase 7: Replacing 'not started' RuntimeError guards with auto-start")
     print("  " + "─" * 52)
     total_fixed += phase7_fix_not_started_guards(scan_files)
+
+    print("\n  Phase 8: Stubbing missing sub-object methods (attr.method())")
+    print("  " + "─" * 52)
+    total_fixed += phase8_stub_missing_attr_methods(scan_files)
 
     # Second pass of Phase 2 — earlier phases may expose new import mismatches
     print("\n  Phase 2 (second pass)")
