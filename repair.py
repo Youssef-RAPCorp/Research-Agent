@@ -1454,6 +1454,132 @@ def phase9_arxiv_rate_limit_backoff(scan_files: list) -> int:
     return fixed
 
 
+# ── Phase 15: Fix insight extraction (results format + _generate_insights) ───
+
+def phase15_fix_insight_extraction(scan_files: list) -> int:
+    """
+    Two targeted fixes that together give ResearchAgent real key_findings:
+
+    A) SynthesisAgent.process_request — when called internally by
+       comprehensive_research it receives {'results': [...], 'query': ...}
+       instead of {'agent_outputs': {...}}.  Inject a normalisation block
+       right after  agent_outputs = request.get('agent_outputs', {})  that
+       extracts paper title+abstract strings from the results list and
+       repacks them as agent_outputs so evidence aggregation has content.
+
+    B) ResearchAgent._generate_insights — the method looks for
+       synthesis_result["synthesis"]["findings"] but SynthesisAgent returns
+       a flat dict with a "content" key.  Two sub-patches:
+         B1) fall back from the nested "synthesis" dict to the flat result
+         B2) if key_findings is still empty, parse bullet-point lines from
+             the "content" string
+    """
+    # Pattern A target
+    AGENT_OUTPUTS_RE = re.compile(
+        r'^([ \t]+)(agent_outputs\s*=\s*request\.get\s*\(\s*[\'"]agent_outputs[\'"]\s*,\s*\{\}\s*\))',
+        re.MULTILINE,
+    )
+    # Pattern B1 target
+    SYNTH_CONTENT_RE = re.compile(
+        r'^([ \t]+)(synthesis_content\s*=\s*synthesis_result\.get\s*\(\s*[\'"]synthesis[\'"]\s*,\s*\{\}\s*\))',
+        re.MULTILINE,
+    )
+    # Pattern B2 target — last metadata line before return in _generate_insights
+    SOURCE_DIV_RE = re.compile(
+        r'^([ \t]+)(insights\[[\'"]source_diversity[\'"]\]\s*=\s*synthesis_content\.get\([^)]+\))',
+        re.MULTILINE,
+    )
+
+    fixed = 0
+    for py_file in scan_files:
+        if not py_file.exists():
+            continue
+        path_lower = str(py_file).lower()
+        try:
+            src = py_file.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            continue
+
+        new_src = src
+
+        # ── Pattern A ──────────────────────────────────────────────────────────
+        if 'synthesis_agent' in path_lower and 'agent_outputs' in src:
+            already = 'request.get("results")' in src or "request.get('results')" in src
+            if not already:
+                def _fix_agent_outputs(m: re.Match) -> str:
+                    d1 = m.group(1)
+                    line = m.group(2)
+                    d2 = d1 + '    '
+                    d3 = d1 + '        '
+                    d4 = d1 + '            '
+                    d5 = d1 + '                '
+                    d6 = d1 + '                    '
+                    return (
+                        f'{d1}{line}\n'
+                        f'{d1}if not agent_outputs and "results" in request:\n'
+                        f'{d2}_parts = []\n'
+                        f'{d2}for _r in (request.get("results") or []):\n'
+                        f'{d3}if not isinstance(_r, dict):\n'
+                        f'{d4}continue\n'
+                        f'{d3}for _p in _r.get("papers", []):\n'
+                        f'{d4}if isinstance(_p, dict):\n'
+                        f'{d5}_t = _p.get("title", "")\n'
+                        f'{d5}_a = _p.get("abstract", _p.get("summary", ""))\n'
+                        f'{d5}if _a:\n'
+                        f'{d6}_parts.append("Title: " + _t + "\\nAbstract: " + _a)\n'
+                        f'{d3}_c = _r.get("content", _r.get("text", ""))\n'
+                        f'{d3}if isinstance(_c, str) and _c:\n'
+                        f'{d4}_parts.append(_c)\n'
+                        f'{d2}if _parts:\n'
+                        f'{d3}agent_outputs = {{"research_agent": "\\n\\n".join(_parts)}}'
+                    )
+                patched = AGENT_OUTPUTS_RE.sub(_fix_agent_outputs, new_src)
+                if patched != new_src:
+                    new_src = patched
+
+        # ── Patterns B1 + B2 ──────────────────────────────────────────────────
+        if 'research_agent' in path_lower and '_generate_insights' in src:
+            # B1: fall back from nested synthesis dict to flat result
+            if 'if not synthesis_content:' not in src:
+                def _fix_synth_content(m: re.Match) -> str:
+                    ind = m.group(1)
+                    line = m.group(2)
+                    return (
+                        f'{ind}{line}\n'
+                        f'{ind}if not synthesis_content:\n'
+                        f'{ind}    synthesis_content = synthesis_result'
+                    )
+                patched = SYNTH_CONTENT_RE.sub(_fix_synth_content, new_src)
+                if patched != new_src:
+                    new_src = patched
+
+            # B2: parse bullet-point lines from content if key_findings empty
+            if 'insights["key_findings"].append' not in src:
+                def _fix_source_div(m: re.Match) -> str:
+                    ind = m.group(1)
+                    line = m.group(2)
+                    d2 = ind + '    '
+                    d3 = ind + '        '
+                    return (
+                        f'{ind}{line}\n'
+                        f'{ind}if not insights["key_findings"]:\n'
+                        f'{d2}for _cl in synthesis_content.get("content", "").splitlines():\n'
+                        f'{d3}_cs = _cl.strip()\n'
+                        f'{d3}if _cs and _cs[0] in ("\u2022", "-"):\n'
+                        f'{d3}    insights["key_findings"].append(_cs[1:].strip())'
+                    )
+                patched = SOURCE_DIV_RE.sub(_fix_source_div, new_src)
+                if patched != new_src:
+                    new_src = patched
+
+        if new_src != src:
+            py_file.write_text(new_src, encoding='utf-8')
+            print(f"  FIXED [insight-ext  ]  {py_file}  →  insight extraction patched")
+            fixed += 1
+
+    return fixed
+
+
 # ── Phase 14: Patch QdrantStore to use in-memory fallback ────────────────────
 
 def phase14_fix_qdrant_client_init(scan_files: list) -> int:
@@ -2039,6 +2165,10 @@ def run():
     print("\n  Phase 11: Fixing synthesis-style run() stubs (process_request + agent_outputs)")
     print("  " + "─" * 52)
     total_fixed += phase11_fix_synthesis_run_stub(scan_files)
+
+    print("\n  Phase 15: Fixing insight extraction (results format + _generate_insights)")
+    print("  " + "─" * 52)
+    total_fixed += phase15_fix_insight_extraction(scan_files)
 
     print("\n  Phase 10: Fixing type-dispatch None fallback (VectorSearch)")
     print("  " + "─" * 52)
