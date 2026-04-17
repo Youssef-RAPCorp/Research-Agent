@@ -1409,6 +1409,99 @@ def phase9_arxiv_rate_limit_backoff(scan_files: list) -> int:
     return fixed
 
 
+# ── Phase 10: Fix VectorSearch / type-dispatch None fallback ─────────────────
+
+def phase10_fix_vector_search_dispatch(scan_files: list) -> int:
+    """
+    Two-part fix for agents whose process_message dispatches on message.get("type"):
+
+    Part 1 — Missing-type fallback:
+        Callers like ResearchAgent pass {"query": ..., "top_k": ...} with NO "type"
+        key, causing the else-branch to return {"status":"error","message":"Unknown
+        message type: None"}.  We insert an elif branch before the else:
+
+            elif message_type is None:
+                return await self._handle_semantic_search(message)
+
+        (or whichever _handle_* is first available)
+
+    Part 2 — Wrong-type stub:
+        Phase 6 injects a run() stub that calls
+            self.process_message({'query': query, 'type': 'comprehensive'})
+        'comprehensive' is not a valid dispatch value in VectorSearchAgent, so it
+        also hits the else-error.  Replace 'type': 'comprehensive' with
+        'type': 'semantic_search' when the agent has _handle_semantic_search.
+    """
+    ELSE_UNKNOWN = re.compile(
+        r'([ \t]+)(else:[ \t]*\n)'
+        r'([ \t]+return \{[^\n]*[Uu]nknown message type[^\n]*\n)',
+        re.MULTILINE,
+    )
+    HAS_TYPE_DISPATCH = re.compile(r"message_type\s*=\s*message\.get\(['\"]type['\"]\)")
+    COMPREHENSIVE_STUB = re.compile(r"\{'query': query, 'type': 'comprehensive'\}")
+    HANDLER_PRIORITY = [
+        '_handle_semantic_search', '_handle_search', '_handle_query',
+        '_execute_search', '_process_query',
+    ]
+
+    fixed = 0
+    for py_file in scan_files:
+        if not py_file.exists() or py_file.name in ('repair.py', 'install.py'):
+            continue
+        try:
+            src = py_file.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            continue
+
+        new_src = src
+
+        # ── Part 1: add elif message_type is None ──────────────────────────
+        if HAS_TYPE_DISPATCH.search(new_src) and 'Unknown message type' in new_src:
+            if 'elif message_type is None:' not in new_src:
+                fallback = None
+                for h in HANDLER_PRIORITY:
+                    if re.search(rf'\bdef {re.escape(h)}\s*\(', new_src):
+                        fallback = h
+                        break
+                if fallback:
+                    is_async = bool(re.search(
+                        rf'async\s+def {re.escape(fallback)}\s*\(', new_src
+                    ))
+                    aw = 'await ' if is_async else ''
+                    _fb = fallback   # capture for closure
+                    _aw = aw
+
+                    def _insert_none(m: re.Match, _fb=_fb, _aw=_aw) -> str:
+                        ind    = m.group(1)
+                        else_nl = m.group(2)
+                        ret_ln  = m.group(3)
+                        return (
+                            f'{ind}elif message_type is None:\n'
+                            f'{ind}    return {_aw}self.{_fb}(message)\n'
+                            f'{ind}{else_nl}{ret_ln}'
+                        )
+
+                    patched = ELSE_UNKNOWN.sub(_insert_none, new_src)
+                    if patched != new_src:
+                        new_src = patched
+                        print(f"  FIXED [vec-dispatch]  {py_file}  →  None type → {fallback}")
+
+        # ── Part 2: fix 'type': 'comprehensive' in injected run() stubs ────
+        if '_handle_semantic_search' in new_src and "'type': 'comprehensive'" in new_src:
+            patched = COMPREHENSIVE_STUB.sub(
+                "{'query': query, 'type': 'semantic_search'}", new_src
+            )
+            if patched != new_src:
+                new_src = patched
+                print(f"  FIXED [vec-dispatch]  {py_file}  →  type:comprehensive → semantic_search")
+
+        if new_src != src:
+            py_file.write_text(new_src, encoding='utf-8')
+            fixed += 1
+
+    return fixed
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def run():
@@ -1469,6 +1562,10 @@ def run():
     print("\n  Phase 8: Stubbing missing sub-object methods (attr.method())")
     print("  " + "─" * 52)
     total_fixed += phase8_stub_missing_attr_methods(scan_files)
+
+    print("\n  Phase 10: Fixing type-dispatch None fallback (VectorSearch)")
+    print("  " + "─" * 52)
+    total_fixed += phase10_fix_vector_search_dispatch(scan_files)
 
     # Second pass of Phase 2 — earlier phases may expose new import mismatches
     print("\n  Phase 2 (second pass)")
