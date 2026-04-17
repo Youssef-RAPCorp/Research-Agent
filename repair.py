@@ -667,6 +667,7 @@ _AUTO_IMPORTS = [
     (r'\bhttpx\.',             'import httpx',                                              'httpx'),
     (r'\bnp\.',                'import numpy as np',                                        'np'),
     (r'\bpd\.',                'import pandas as pd',                                       'pd'),
+    (r'\bET\.',                'import xml.etree.ElementTree as ET',                        'ET'),
 ]
 
 
@@ -1344,7 +1345,7 @@ def phase8_stub_missing_attr_methods(scan_files: list) -> int:
             _, ins = _class_body_and_ins(new_src, tcls_m)
             for method_name in sorted(cls_methods[cls_name]):
                 stub = (
-                    f'\n    def {method_name}(self, *args, **kwargs):\n'
+                    f'\n    async def {method_name}(self, *args, **kwargs):\n'
                     f'        return dict()\n'
                 )
                 new_src    = new_src[:ins] + stub + new_src[ins:]
@@ -1407,6 +1408,95 @@ def phase9_arxiv_rate_limit_backoff(scan_files: list) -> int:
             py_file.write_text(new_src, encoding='utf-8')
             print(f"  FIXED [arxiv-429   ]  {py_file}  →  graceful 429/503 back-off")
             fixed += 1
+    return fixed
+
+
+# ── Phase 12: Fix method signature / async stub issues ───────────────────────
+
+def phase12_fix_method_signatures(scan_files: list) -> int:
+    """
+    Two-part fix for method-level issues that Phase 4 (init-only) doesn't cover:
+
+    Part A — Upgrade sync stubs to async:
+        Phase 8 previously injected synchronous stubs:
+            def method_name(self, *args, **kwargs):
+                return dict()
+        If the caller does `await self.x.method_name(...)`, this crashes with
+        "object dict can't be used in 'await' expression".
+        Replace these stubs with `async def`.
+
+    Part B — Add **kwargs to storage/search method signatures:
+        Callers pass keyword args (e.g. vector=, top_k=, filters=) that the
+        real method signature doesn't declare, causing TypeError.  Adding
+        **kwargs absorbs unknown keys so the method no longer crashes.
+        Targets: search, query, similarity_search, vector_search, retrieve,
+        store, store_context, get_context, insert, upsert, embed, encode, find.
+    """
+    # ── Part A: sync stub → async ─────────────────────────────────────────────
+    SYNC_STUB = re.compile(
+        r'\n([ \t]+)def (\w+)\(self,[ \t]*\*args,[ \t]*\*\*kwargs\):[ \t]*\n'
+        r'[ \t]+return dict\(\)[ \t]*\n',
+        re.MULTILINE,
+    )
+
+    # ── Part B: add **kwargs to fixed-signature methods ───────────────────────
+    TARGET_METHODS = {
+        'search', 'query', 'similarity_search', 'vector_search',
+        'retrieve', 'store', 'store_context', 'get_context',
+        'insert', 'upsert', 'update', 'delete', 'embed', 'encode', 'find',
+    }
+    # Matches:  def method(self, params):  or  async def method(self, params):
+    # where params does NOT already contain **
+    METHOD_RE = re.compile(
+        r'^([ \t]+(?:async\s+)?def (' + '|'.join(TARGET_METHODS) + r')\(self)([^)]*)\)'
+        r'([ \t]*(?:->[^:]+)?[ \t]*:)',
+        re.MULTILINE,
+    )
+
+    fixed = 0
+    for py_file in scan_files:
+        if not py_file.exists() or py_file.name in ('repair.py', 'install.py'):
+            continue
+        try:
+            src = py_file.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            continue
+
+        new_src = src
+
+        # Part A
+        def _make_async(m: re.Match) -> str:
+            ind        = m.group(1)
+            method_name = m.group(2)
+            return (
+                f'\n{ind}async def {method_name}(self, *args, **kwargs):\n'
+                f'{ind}    return dict()\n'
+            )
+
+        patched = SYNC_STUB.sub(_make_async, new_src)
+        if patched != new_src:
+            new_src = patched
+            print(f"  FIXED [async-stub  ]  {py_file}  →  sync stubs → async def")
+
+        # Part B
+        def _add_kwargs(m: re.Match) -> str:
+            prefix   = m.group(1)   # '    def search(self'
+            params   = m.group(3)   # ', query, top_k=10'
+            suffix   = m.group(4)   # '    -> ...: '
+            if '**' in params:
+                return m.group(0)   # already has **kwargs
+            sep = ', ' if params.strip() else ''
+            return f"{prefix}{params}{sep}**kwargs){suffix}"
+
+        patched = METHOD_RE.sub(_add_kwargs, new_src)
+        if patched != new_src:
+            new_src = patched
+            print(f"  FIXED [method-kwargs]  {py_file}  →  added **kwargs to storage/search methods")
+
+        if new_src != src:
+            py_file.write_text(new_src, encoding='utf-8')
+            fixed += 1
+
     return fixed
 
 
@@ -1627,6 +1717,10 @@ def run():
     print("\n  Phase 9: ArXiv rate-limit backoff (429/503 → sleep + empty list)")
     print("  " + "─" * 52)
     total_fixed += phase9_arxiv_rate_limit_backoff(scan_files)
+
+    print("\n  Phase 12: Fixing method signatures (async stubs + **kwargs on storage methods)")
+    print("  " + "─" * 52)
+    total_fixed += phase12_fix_method_signatures(scan_files)
 
     print("\n  Phase 8: Stubbing missing sub-object methods (attr.method())")
     print("  " + "─" * 52)
