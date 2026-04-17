@@ -1454,6 +1454,69 @@ def phase9_arxiv_rate_limit_backoff(scan_files: list) -> int:
     return fixed
 
 
+# ── Phase 13: Fix kwarg name mismatch in .search() calls ─────────────────────
+
+def phase13_fix_search_kwarg_names(scan_files: list) -> int:
+    """
+    QdrantStore.search() declares its first param as 'query_vector', but
+    VectorSearchAgent calls it as search(vector=...).
+
+    After Phase 12B added **kwargs to QdrantStore.search(), the 'vector'
+    kwarg is absorbed silently while 'query_vector' (still required, no
+    default) is never provided → TypeError: missing required positional arg.
+
+    Fix: inside every .search( call invocation, rename 'vector=' → 'query_vector='.
+    Uses paren-balancing to isolate only the call arguments.
+    """
+    fixed = 0
+    for py_file in scan_files:
+        if not py_file.exists() or py_file.name in ('repair.py', 'install.py'):
+            continue
+        try:
+            src = py_file.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            continue
+
+        if 'vector=' not in src or '.search(' not in src:
+            continue
+
+        new_src = src
+        # Find every '.search(' and balance-walk to the closing ')'
+        search_re = re.compile(r'\.search\s*\(')
+        any_change = False
+        # Process in reverse to preserve offsets
+        positions = [(m.start(), m.end()) for m in search_re.finditer(new_src)]
+        for call_start, after_open in reversed(positions):
+            open_paren = after_open - 1
+            depth, i = 0, open_paren
+            while i < len(new_src):
+                if new_src[i] == '(':
+                    depth += 1
+                elif new_src[i] == ')':
+                    depth -= 1
+                    if depth == 0:
+                        break
+                i += 1
+            close_paren = i
+            args_str = new_src[open_paren + 1:close_paren]
+            if 'vector=' not in args_str:
+                continue
+            # Rename vector= → query_vector= (only bare 'vector', not 'query_vector')
+            fixed_args = re.sub(r'(?<!\w)vector\s*=', 'query_vector=', args_str)
+            if fixed_args != args_str:
+                new_src = (new_src[:open_paren + 1]
+                           + fixed_args
+                           + new_src[close_paren:])
+                any_change = True
+
+        if any_change:
+            py_file.write_text(new_src, encoding='utf-8')
+            print(f"  FIXED [search-kwarg]  {py_file}  →  vector= → query_vector=")
+            fixed += 1
+
+    return fixed
+
+
 # ── Phase 12: Fix method signature / async stub issues ───────────────────────
 
 def _add_kwargs_to_method(src: str, method_name: str) -> tuple:
@@ -1829,6 +1892,10 @@ def run():
     print("\n  Phase 9: ArXiv rate-limit backoff (429/503 → sleep + empty list)")
     print("  " + "─" * 52)
     total_fixed += phase9_arxiv_rate_limit_backoff(scan_files)
+
+    print("\n  Phase 13: Fixing .search() kwarg name mismatch (vector= → query_vector=)")
+    print("  " + "─" * 52)
+    total_fixed += phase13_fix_search_kwarg_names(scan_files)
 
     print("\n  Phase 12 (pre): Removing incorrectly-added await from container method calls")
     print("  " + "─" * 52)
