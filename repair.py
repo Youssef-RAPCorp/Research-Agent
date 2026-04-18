@@ -2199,6 +2199,10 @@ def run():
     print("  " + "─" * 52)
     total_fixed += phase21_fix_arxiv_result_serialization(scan_files)
 
+    print("\n  Phase 22: Add ArXiv diagnostic logging (expose silent failures)")
+    print("  " + "─" * 52)
+    total_fixed += phase22_add_arxiv_diagnostics(scan_files)
+
     print("\n  Phase 18: Format orchestrator output (extract content from research dict)")
     print("  " + "─" * 52)
     total_fixed += phase18_fix_orchestrator_output(scan_files)
@@ -2596,6 +2600,83 @@ def phase21_fix_arxiv_result_serialization(scan_files: list) -> int:
     TARGET.write_text(src.replace(OLD, NEW), encoding='utf-8')
     print(f"  FIXED [arxiv-serial ]  {TARGET}  ->  return papers as plain dicts, skip Pydantic serialization")
     return 1
+
+
+# ── Phase 22: Add ArXiv diagnostic logging to expose silent failures ───────────
+
+def phase22_add_arxiv_diagnostics(scan_files: list) -> int:
+    """
+    ArXiv searches complete in <1 second with 0 papers but 6 open connections.
+    Add logging to the two most likely failure points so the root cause appears
+    in the console without needing a debugger:
+      1. search_papers except block  — log the actual exception type + message
+      2. research_agent after gather — log each result type / paper count
+    """
+    fixed = 0
+
+    # ── arxiv_search_agent: log silent exception ───────────────────────────────
+    AA = Path('agents/arxiv_search_agent.py')
+    if AA.exists():
+        try:
+            src = AA.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            src = None
+        if src:
+            OLD_EX = (
+                '        except Exception as e:\n'
+                '            handle_error(e)\n'
+                '            return SearchResult(\n'
+                '                papers=[],\n'
+                '                total_found=0,\n'
+                '                query_used="",\n'
+                '                search_time=asyncio.get_event_loop().time() - start_time\n'
+                '            )\n'
+            )
+            NEW_EX = (
+                '        except Exception as e:\n'
+                '            handle_error(e)\n'
+                '            self.logger.error(\n'
+                '                f"[arxiv-search FAILED] {type(e).__name__}: {e}"\n'
+                '            )\n'
+                '            return SearchResult(\n'
+                '                papers=[],\n'
+                '                total_found=0,\n'
+                '                query_used="",\n'
+                '                search_time=asyncio.get_event_loop().time() - start_time\n'
+                '            )\n'
+            )
+            if OLD_EX in src and NEW_EX not in src:
+                src = src.replace(OLD_EX, NEW_EX)
+                AA.write_text(src, encoding='utf-8')
+                print(f"  FIXED [arxiv-diag   ]  {AA}  ->  log exception type in search_papers")
+                fixed += 1
+
+    # ── research_agent: log gather results ────────────────────────────────────
+    RA = Path('agents/research_agent.py')
+    if RA.exists():
+        try:
+            src = RA.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            src = None
+        if src:
+            OLD_GA = (
+                '        # Filter successful results\n'
+                '        valid_results = [r for r in search_results if not isinstance(r, Exception)]\n'
+            )
+            NEW_GA = (
+                '        # Filter successful results\n'
+                '        valid_results = [r for r in search_results if not isinstance(r, Exception)]\n'
+                '        for _i, _sr in enumerate(search_results):\n'
+                '            _np = len(_sr.get("papers", [])) if isinstance(_sr, dict) else "ERR"\n'
+                '            logger.info(f"[gather #{_i}] type={type(_sr).__name__} papers={_np} keys={list(_sr.keys()) if isinstance(_sr, dict) else _sr}")\n'
+            )
+            if OLD_GA in src and NEW_GA not in src:
+                src = src.replace(OLD_GA, NEW_GA)
+                RA.write_text(src, encoding='utf-8')
+                print(f"  FIXED [arxiv-diag   ]  {RA}  ->  log each gather result + paper count")
+                fixed += 1
+
+    return fixed
 
 
 # ── Phase 19: Fix --overnight keep-alive (scheduler exits immediately) ─────────

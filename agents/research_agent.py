@@ -101,6 +101,9 @@ class ResearchAgent(BaseAgent):
         
         # Filter successful results
         valid_results = [r for r in search_results if not isinstance(r, Exception)]
+        for _i, _sr in enumerate(search_results):
+            _np = len(_sr.get("papers", [])) if isinstance(_sr, dict) else "ERR"
+            logger.info(f"[gather #{_i}] type={type(_sr).__name__} papers={_np} keys={list(_sr.keys()) if isinstance(_sr, dict) else _sr}")
         
         # Synthesize knowledge
         synthesis_result = await self.synthesis_agent.process_message({

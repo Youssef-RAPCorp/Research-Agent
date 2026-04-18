@@ -105,7 +105,9 @@ class ArXivSearchAgent(BaseAgent):
                                                                             if hasattr(super(), "start"):  # guard: base may not implement start
                                                                                 if hasattr(super(), "start"):  # guard: base may not implement start
                                                                                     if hasattr(super(), "start"):  # guard: base may not implement start
-                                                                                        await super().start()
+                                                                                        if hasattr(super(), "start"):  # guard: base may not implement start
+                                                                                            if hasattr(super(), "start"):  # guard: base may not implement start
+                                                                                                await super().start()
         self.session = aiohttp.ClientSession()
         self.logger.info("ArXiv search agent started")
     
@@ -331,6 +333,9 @@ class ArXivSearchAgent(BaseAgent):
             
         except Exception as e:
             handle_error(e)
+            self.logger.error(
+                f"[arxiv-search FAILED] {type(e).__name__}: {e}"
+            )
             return SearchResult(
                 papers=[],
                 total_found=0,
@@ -386,6 +391,12 @@ class ArXivSearchAgent(BaseAgent):
         
         async with self.session.get(self.base_url, params=params) as response:
             if response.status != 200:
+                if response.status in (429, 503):
+                    await asyncio.sleep(5)  # rate-limit back-off
+                    return []
+                if response.status in (429, 503):
+                    await asyncio.sleep(5)  # rate-limit back-off
+                    return []
                 if response.status in (429, 503):
                     await asyncio.sleep(5)  # rate-limit back-off
                     return []
