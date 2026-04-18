@@ -2195,6 +2195,10 @@ def run():
     print("  " + "─" * 52)
     total_fixed += phase20_fix_paper_extraction(scan_files)
 
+    print("\n  Phase 21: Fix ArXiv result serialization (Pydantic dataclass bug)")
+    print("  " + "─" * 52)
+    total_fixed += phase21_fix_arxiv_result_serialization(scan_files)
+
     print("\n  Phase 18: Format orchestrator output (extract content from research dict)")
     print("  " + "─" * 52)
     total_fixed += phase18_fix_orchestrator_output(scan_files)
@@ -2529,6 +2533,69 @@ def phase20_fix_paper_extraction(scan_files: list) -> int:
                 fixed += 1
 
     return fixed
+
+
+# ── Phase 21: Fix ArXiv result serialization (avoid Pydantic dataclass bug) ────
+
+def phase21_fix_arxiv_result_serialization(scan_files: list) -> int:
+    """
+    ArXivSearchAgent._handle_search_request wraps ranked ArXivPaper dataclass
+    instances in a new SearchResult(...).model_dump() call.  ArXivPaper has
+    `keywords: List[str] = None` which violates the type hint, causing a
+    Pydantic v2 ValidationError.  The exception is caught by process_message
+    and returned as {'status': 'error'}, so synthesis sees 0 papers.
+
+    Fix: return papers as plain dicts directly — no Pydantic round-trip needed.
+    """
+    TARGET = Path('agents/arxiv_search_agent.py')
+    if not TARGET.exists():
+        return 0
+    try:
+        src = TARGET.read_text(encoding='utf-8', errors='replace')
+    except Exception:
+        return 0
+
+    OLD = (
+        "        return {\n"
+        "            'status': 'success',\n"
+        "            'result': SearchResult(\n"
+        "                papers=ranked_papers,\n"
+        "                total_found=search_result.total_found,\n"
+        "                query_used=search_result.query_used,\n"
+        "                search_time=search_result.search_time,\n"
+        "                relevance_ranking={p.id: p.relevance_score for p in ranked_papers}\n"
+        "            ).model_dump(),\n"
+        "            'agent_id': self.agent_id\n"
+        "        }\n"
+    )
+    NEW = (
+        "        return {\n"
+        "            'status': 'success',\n"
+        "            'papers': [\n"
+        "                {\n"
+        "                    'id': p.id,\n"
+        "                    'title': p.title,\n"
+        "                    'abstract': p.abstract,\n"
+        "                    'authors': p.authors,\n"
+        "                    'arxiv_url': p.arxiv_url,\n"
+        "                    'pdf_url': p.pdf_url,\n"
+        "                    'categories': p.categories,\n"
+        "                    'relevance_score': p.relevance_score,\n"
+        "                }\n"
+        "                for p in ranked_papers\n"
+        "            ],\n"
+        "            'total_found': len(ranked_papers),\n"
+        "            'query_used': search_result.query_used,\n"
+        "            'agent_id': self.agent_id,\n"
+        "        }\n"
+    )
+
+    if OLD not in src or NEW in src:
+        return 0
+
+    TARGET.write_text(src.replace(OLD, NEW), encoding='utf-8')
+    print(f"  FIXED [arxiv-serial ]  {TARGET}  ->  return papers as plain dicts, skip Pydantic serialization")
+    return 1
 
 
 # ── Phase 19: Fix --overnight keep-alive (scheduler exits immediately) ─────────
