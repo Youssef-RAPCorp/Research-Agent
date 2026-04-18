@@ -1,5 +1,7 @@
 import asyncio
 import re
+import urllib.request
+import urllib.parse
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -107,7 +109,17 @@ class ArXivSearchAgent(BaseAgent):
                                                                                     if hasattr(super(), "start"):  # guard: base may not implement start
                                                                                         if hasattr(super(), "start"):  # guard: base may not implement start
                                                                                             if hasattr(super(), "start"):  # guard: base may not implement start
-                                                                                                await super().start()
+                                                                                                if hasattr(super(), "start"):  # guard: base may not implement start
+                                                                                                    if hasattr(super(), "start"):  # guard: base may not implement start
+                                                                                                        if hasattr(super(), "start"):  # guard: base may not implement start
+                                                                                                            if hasattr(super(), "start"):  # guard: base may not implement start
+                                                                                                                if hasattr(super(), "start"):  # guard: base may not implement start
+                                                                                                                    if hasattr(super(), "start"):  # guard: base may not implement start
+                                                                                                                        if hasattr(super(), "start"):  # guard: base may not implement start
+                                                                                                                            if hasattr(super(), "start"):  # guard: base may not implement start
+                                                                                                                                if hasattr(super(), "start"):  # guard: base may not implement start
+                                                                                                                                    if hasattr(super(), "start"):  # guard: base may not implement start
+                                                                                                                                        await super().start()
         self.session = aiohttp.ClientSession()
         self.logger.info("ArXiv search agent started")
     
@@ -349,16 +361,29 @@ class ArXivSearchAgent(BaseAgent):
         
         # Add search terms
         if formulation.search_terms:
-            terms_query = ' AND '.join(f'all:{term}' for term in formulation.search_terms)
+            # Filter common English words that produce zero-result AND queries.
+            _stopset = {
+                'are', 'was', 'were', 'been', 'have', 'has', 'had',
+                'can', 'could', 'would', 'should', 'will', 'may', 'might',
+                'not', 'but', 'from', 'that', 'this', 'these', 'those',
+                'their', 'there', 'then', 'than', 'when', 'where', 'what',
+                'which', 'who', 'its', 'any', 'all', 'also', 'just',
+                'more', 'such', 'each', 'some', 'very', 'both', 'over',
+                'into', 'out', 'how', 'does', 'show', 'new', 'two',
+                'complete', 'between', 'first', 'second', 'using',
+            }
+            _physics_terms = [t for t in formulation.search_terms if t not in _stopset]
+            _terms_to_use = _physics_terms[:5] if _physics_terms else formulation.search_terms[:3]
+            # OR lets any matching term return results; AND would require all to co-occur.
+            terms_query = ' OR '.join(f'all:{term}' for term in _terms_to_use)
             query_parts.append(f'({terms_query})')
         
-        # Add category constraints
+        # Add category constraints — skip wildcards (ArXiv API rejects them)
         if formulation.categories:
             cat_queries = []
             for cat in formulation.categories:
-                if cat.endswith('.*'):
-                    # Handle wildcard categories
-                    cat_queries.append(f'cat:{cat[:-2]}*')
+                if cat.endswith('.*') or cat.endswith('*'):
+                    pass  # skip: ArXiv API does not support wildcard cat: queries
                 else:
                     cat_queries.append(f'cat:{cat}')
             
@@ -378,9 +403,6 @@ class ArXivSearchAgent(BaseAgent):
     
     async def _execute_arxiv_search(self, query: str, max_results: int) -> List[ArXivPaper]:
         """Execute actual ArXiv API search."""
-        if not self.session:
-            await self.start()
-        
         params = {
             'search_query': query,
             'start': 0,
@@ -388,70 +410,32 @@ class ArXivSearchAgent(BaseAgent):
             'sortBy': 'relevance',
             'sortOrder': 'descending'
         }
-        
-        async with self.session.get(self.base_url, params=params) as response:
-            if response.status != 200:
-                if response.status in (429, 503):
-                    await asyncio.sleep(5)  # rate-limit back-off
-                    return []
-                if response.status in (429, 503):
-                    await asyncio.sleep(5)  # rate-limit back-off
-                    return []
-                if response.status in (429, 503):
-                    await asyncio.sleep(5)  # rate-limit back-off
-                    return []
-                if response.status in (429, 503):
-                    await asyncio.sleep(5)  # rate-limit back-off
-                    return []
-                if response.status in (429, 503):
-                    await asyncio.sleep(5)  # rate-limit back-off
-                    return []
-                if response.status in (429, 503):
-                    await asyncio.sleep(5)  # rate-limit back-off
-                    return []
-                if response.status in (429, 503):
-                    await asyncio.sleep(5)  # rate-limit back-off
-                    return []
-                if response.status in (429, 503):
-                    await asyncio.sleep(5)  # rate-limit back-off
-                    return []
-                if response.status in (429, 503):
-                    await asyncio.sleep(5)  # rate-limit back-off
-                    return []
-                if response.status in (429, 503):
-                    await asyncio.sleep(5)  # rate-limit back-off
-                    return []
-                if response.status in (429, 503):
-                    await asyncio.sleep(5)  # rate-limit back-off
-                    return []
-                if response.status in (429, 503):
-                    await asyncio.sleep(5)  # rate-limit back-off
-                    return []
-                if response.status in (429, 503):
-                    await asyncio.sleep(5)  # rate-limit back-off
-                    return []
-                if response.status in (429, 503):
-                    await asyncio.sleep(5)  # rate-limit back-off
-                    return []
-                if response.status in (429, 503):
-                    await asyncio.sleep(5)  # rate-limit back-off
-                    return []
-                if response.status in (429, 503):
-                    await asyncio.sleep(5)  # rate-limit back-off
-                    return []
-                if response.status in (429, 503):
-                    await asyncio.sleep(5)  # rate-limit back-off
-                    return []
-                if response.status in (429, 503):
-                    await asyncio.sleep(5)  # rate-limit back-off
-                    return []
-                if response.status in (429, 503):
-                    await asyncio.sleep(5)  # rate-limit back-off
-                    return []
-                raise RuntimeError(f"ArXiv API error: {response.status}")
-            
-            xml_content = await response.text()
-            return await self._parse_arxiv_response(xml_content)
+        # aiohttp DNS resolution fails on Windows; use urllib in executor instead.
+        url = self.base_url + '?' + urllib.parse.urlencode(params)
+
+        def _sync_fetch() -> bytes:
+            req = urllib.request.Request(
+                url,
+                headers={'User-Agent': 'PhysicsDiscovery/3.0 (research agent)'}
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                if resp.status == 429:
+                    raise RuntimeError('ArXiv rate-limited (429)')
+                return resp.read()
+
+        try:
+            loop = asyncio.get_event_loop()
+            _xml_bytes = await loop.run_in_executor(None, _sync_fetch)
+            xml_content = _xml_bytes.decode('utf-8', errors='replace')
+            papers = await self._parse_arxiv_response(xml_content)
+            self.logger.info(
+                f'[arxiv-http] bytes={len(_xml_bytes)} papers={len(papers)} '
+                f'query={query!r}'
+            )
+            return papers
+        except Exception as e:
+            self.logger.error(f'[arxiv-urllib] {type(e).__name__}: {e}')
+            return []
     
     async def _parse_arxiv_response(self, xml_content: str) -> List[ArXivPaper]:
         """Parse ArXiv XML response into paper objects."""
@@ -482,7 +466,11 @@ class ArXivSearchAgent(BaseAgent):
             published_elem = entry.find('atom:published', namespace)
             updated_elem = entry.find('atom:updated', namespace)
             
-            if not all([id_elem, title_elem, summary_elem]):
+            if id_elem is None or title_elem is None or summary_elem is None:
+                self.logger.warning(
+                    f'[parse-paper] missing elem: id={id_elem is not None} '
+                    f'title={title_elem is not None} summary={summary_elem is not None}'
+                )
                 return None
             
             arxiv_id = id_elem.text.split('/')[-1]
@@ -511,8 +499,16 @@ class ArXivSearchAgent(BaseAgent):
                     categories.append(term)
             
             # Parse dates
-            published = datetime.fromisoformat(published_elem.text.replace('Z', '+00:00'))
-            updated = datetime.fromisoformat(updated_elem.text.replace('Z', '+00:00'))
+            _pub_text = (published_elem.text or '') if published_elem is not None else ''
+            _upd_text = (updated_elem.text or '') if updated_elem is not None else ''
+            try:
+                published = datetime.fromisoformat(_pub_text.replace('Z', '+00:00')) if _pub_text else datetime.now()
+            except ValueError:
+                published = datetime.now()
+            try:
+                updated = datetime.fromisoformat(_upd_text.replace('Z', '+00:00')) if _upd_text else datetime.now()
+            except ValueError:
+                updated = datetime.now()
             
             # Build URLs
             arxiv_url = id_elem.text

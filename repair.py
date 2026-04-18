@@ -2203,6 +2203,26 @@ def run():
     print("  " + "─" * 52)
     total_fixed += phase22_add_arxiv_diagnostics(scan_files)
 
+    print("\n  Phase 23: Fix ArXiv query logic (AND -> OR, filter generic words)")
+    print("  " + "─" * 52)
+    total_fixed += phase23_fix_arxiv_query_logic(scan_files)
+
+    print("\n  Phase 24: Drop broken category wildcard from ArXiv query + log query_used")
+    print("  " + "─" * 52)
+    total_fixed += phase24_fix_arxiv_category_wildcard(scan_files)
+
+    print("\n  Phase 25: Fix aiohttp session management (fresh session per request)")
+    print("  " + "─" * 52)
+    total_fixed += phase25_fix_arxiv_session_management(scan_files)
+
+    print("\n  Phase 27: Fix cosine_similarity stub + UTF-8 print encoding")
+    print("  " + "─" * 52)
+    total_fixed += phase27_fix_cosine_similarity_and_encoding(scan_files)
+
+    print("\n  Phase 26: Fix ArXiv XML element truthiness bug (papers=0 despite valid XML)")
+    print("  " + "─" * 52)
+    total_fixed += phase26_fix_xml_element_truthiness(scan_files)
+
     print("\n  Phase 18: Format orchestrator output (extract content from research dict)")
     print("  " + "─" * 52)
     total_fixed += phase18_fix_orchestrator_output(scan_files)
@@ -2723,6 +2743,383 @@ def phase19_fix_overnight_keepalive(scan_files: list) -> int:
             print(f"  FIXED [overnight    ]  {mp}  ->  added keep-alive loop to --overnight mode")
             fixed += 1
     return fixed
+
+
+# ── Phase 25: Fix aiohttp session management (fresh session per request) ─────────
+
+def phase25_fix_arxiv_session_management(scan_files: list) -> int:
+    """
+    ArXivSearchAgent._execute_arxiv_search reuses a shared self.session across
+    all 6 concurrent asyncio.gather requests.  The session is created inside
+    start() which has deeply-nested hasattr guards; if start() fails the session
+    is never set.  Even when it is set, sharing one session across concurrent
+    requests (without proper connector limits or timeouts) causes aiohttp to
+    leave connections unclosed and may return empty response bodies.
+
+    Fix: replace the shared-session pattern with `async with aiohttp.ClientSession()`
+    per request.  Each call gets a fresh, self-closing session with a 30-second
+    timeout.  Also read bytes (not text) to avoid encoding-detection mismatch that
+    can make xml_content appear empty.  Log the HTTP status and XML byte-length so
+    future failures are visible immediately.
+    """
+    TARGET = Path('agents/arxiv_search_agent.py')
+    if not TARGET.exists():
+        return 0
+    try:
+        src = TARGET.read_text(encoding='utf-8', errors='replace')
+    except Exception:
+        return 0
+
+    OLD = (
+        "    async def _execute_arxiv_search(self, query: str, max_results: int) -> List[ArXivPaper]:\n"
+        "        \"\"\"Execute actual ArXiv API search.\"\"\"\n"
+        "        if not self.session:\n"
+        "            await self.start()\n"
+        "        \n"
+        "        params = {\n"
+        "            'search_query': query,\n"
+        "            'start': 0,\n"
+        "            'max_results': max_results,\n"
+        "            'sortBy': 'relevance',\n"
+        "            'sortOrder': 'descending'\n"
+        "        }\n"
+        "        \n"
+        "        async with self.session.get(self.base_url, params=params) as response:\n"
+    )
+    NEW = (
+        "    async def _execute_arxiv_search(self, query: str, max_results: int) -> List[ArXivPaper]:\n"
+        "        \"\"\"Execute actual ArXiv API search.\"\"\"\n"
+        "        params = {\n"
+        "            'search_query': query,\n"
+        "            'start': 0,\n"
+        "            'max_results': max_results,\n"
+        "            'sortBy': 'relevance',\n"
+        "            'sortOrder': 'descending'\n"
+        "        }\n"
+        "        _timeout = aiohttp.ClientTimeout(total=30)\n"
+        "        async with aiohttp.ClientSession(timeout=_timeout) as _session:\n"
+        "          async with _session.get(self.base_url, params=params) as response:\n"
+    )
+
+    if OLD not in src or NEW in src:
+        return 0
+
+    # Now we also need to fix the indented body that follows: the old code has
+    # 12-space indentation inside `async with self.session.get(...)`.
+    # After the replacement, the body needs 12 spaces too (2 extra for the new
+    # double-nested async with).  We'll patch the lines that read xml_content
+    # and call _parse_arxiv_response to also read bytes and log.
+    new_src = src.replace(OLD, NEW)
+
+    # Replace response.text() with byte-safe read + log
+    OLD_READ = (
+        "            xml_content = await response.text()\n"
+        "            return await self._parse_arxiv_response(xml_content)\n"
+    )
+    NEW_READ = (
+        "            _xml_bytes = await response.read()\n"
+        "            xml_content = _xml_bytes.decode('utf-8', errors='replace')\n"
+        "            papers = await self._parse_arxiv_response(xml_content)\n"
+        "            self.logger.info(\n"
+        "                f'[arxiv-http] status={response.status} '\n"
+        "                f'bytes={len(_xml_bytes)} papers={len(papers)} '\n"
+        "                f'query={query!r}'\n"
+        "            )\n"
+        "            return papers\n"
+    )
+    if OLD_READ in new_src:
+        new_src = new_src.replace(OLD_READ, NEW_READ)
+
+    if new_src == src:
+        return 0
+
+    TARGET.write_text(new_src, encoding='utf-8')
+    print(f"  FIXED [arxiv-session]  {TARGET}  ->  fresh aiohttp session per request + byte-safe read")
+    return 1
+
+
+# ── Phase 24: Drop broken category wildcard + expose query_used in diagnostics ──
+
+def phase24_fix_arxiv_category_wildcard(scan_files: list) -> int:
+    """
+    _build_arxiv_query converts 'physics.*' → 'cat:physics*' and ANDs it with the
+    terms query.  ArXiv API does NOT support bare-star wildcards in cat: fields, so
+    'cat:physics*' matches nothing and the whole AND query returns 0 entries.
+
+    Two targeted fixes:
+    1. In _build_arxiv_query: skip any category that is a wildcard (ends with '*')
+       so the final query is just the terms OR expression, which always returns results.
+    2. In the gather diagnostic: also log query_used so the actual ArXiv URL params
+       are visible in the console.
+    """
+    fixed = 0
+
+    # ── Fix 1: skip wildcard categories in _build_arxiv_query ────────────────
+    AA = Path('agents/arxiv_search_agent.py')
+    if AA.exists():
+        try:
+            src = AA.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            src = None
+        if src:
+            OLD_CAT = (
+                "        # Add category constraints\n"
+                "        if formulation.categories:\n"
+                "            cat_queries = []\n"
+                "            for cat in formulation.categories:\n"
+                "                if cat.endswith('.*'):\n"
+                "                    # Handle wildcard categories\n"
+                "                    cat_queries.append(f'cat:{cat[:-2]}*')\n"
+                "                else:\n"
+                "                    cat_queries.append(f'cat:{cat}')\n"
+                "            \n"
+                "            if cat_queries:\n"
+                "                cat_query = ' OR '.join(cat_queries)\n"
+                "                query_parts.append(f'({cat_query})')\n"
+            )
+            NEW_CAT = (
+                "        # Add category constraints — skip wildcards (ArXiv API rejects them)\n"
+                "        if formulation.categories:\n"
+                "            cat_queries = []\n"
+                "            for cat in formulation.categories:\n"
+                "                if cat.endswith('.*') or cat.endswith('*'):\n"
+                "                    pass  # skip: ArXiv API does not support wildcard cat: queries\n"
+                "                else:\n"
+                "                    cat_queries.append(f'cat:{cat}')\n"
+                "            \n"
+                "            if cat_queries:\n"
+                "                cat_query = ' OR '.join(cat_queries)\n"
+                "                query_parts.append(f'({cat_query})')\n"
+            )
+            if OLD_CAT in src and NEW_CAT not in src:
+                src = src.replace(OLD_CAT, NEW_CAT)
+                AA.write_text(src, encoding='utf-8')
+                print(f"  FIXED [arxiv-cat    ]  {AA}  ->  skip wildcard categories in ArXiv query")
+                fixed += 1
+
+    # ── Fix 2: log query_used in the gather diagnostic ───────────────────────
+    RA = Path('agents/research_agent.py')
+    if RA.exists():
+        try:
+            src = RA.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            src = None
+        if src:
+            OLD_LOG = (
+                '            logger.info(f"[gather #{_i}] type={type(_sr).__name__} papers={_np} keys={list(_sr.keys()) if isinstance(_sr, dict) else _sr}")\n'
+            )
+            NEW_LOG = (
+                '            _qu = _sr.get("query_used", "") if isinstance(_sr, dict) else ""\n'
+                '            logger.info(f"[gather #{_i}] type={type(_sr).__name__} papers={_np} query_used={_qu!r} keys={list(_sr.keys()) if isinstance(_sr, dict) else _sr}")\n'
+            )
+            if OLD_LOG in src and NEW_LOG not in src:
+                src = src.replace(OLD_LOG, NEW_LOG)
+                RA.write_text(src, encoding='utf-8')
+                print(f"  FIXED [gather-log   ]  {RA}  ->  also log query_used per gather result")
+                fixed += 1
+
+    return fixed
+
+
+# ── Phase 23: Fix ArXiv query logic — AND → OR, filter generic words ───────────
+
+def phase23_fix_arxiv_query_logic(scan_files: list) -> int:
+    """
+    _build_arxiv_query joins every extracted term with AND:
+        (all:are AND all:maxwell AND all:equations AND all:complete AND all:high AND all:energies)
+    ArXiv returns 0 entries for this because common words like 'are', 'complete',
+    'high' don't appear in ArXiv metadata fields without every other term also
+    matching — the result set is empty.
+
+    Fix: filter a broader set of common English non-physics words, then join the
+    remaining distinctive terms with OR.  A single-term OR query like
+        (all:maxwell OR all:equations OR all:energies)
+    reliably returns hundreds of relevant papers.
+    """
+    TARGET = Path('agents/arxiv_search_agent.py')
+    if not TARGET.exists():
+        return 0
+    try:
+        src = TARGET.read_text(encoding='utf-8', errors='replace')
+    except Exception:
+        return 0
+
+    OLD = (
+        "        if formulation.search_terms:\n"
+        "            terms_query = ' AND '.join(f'all:{term}' for term in formulation.search_terms)\n"
+        "            query_parts.append(f'({terms_query})')\n"
+    )
+    NEW = (
+        "        if formulation.search_terms:\n"
+        "            # Filter common English words that produce zero-result AND queries.\n"
+        "            _stopset = {\n"
+        "                'are', 'was', 'were', 'been', 'have', 'has', 'had',\n"
+        "                'can', 'could', 'would', 'should', 'will', 'may', 'might',\n"
+        "                'not', 'but', 'from', 'that', 'this', 'these', 'those',\n"
+        "                'their', 'there', 'then', 'than', 'when', 'where', 'what',\n"
+        "                'which', 'who', 'its', 'any', 'all', 'also', 'just',\n"
+        "                'more', 'such', 'each', 'some', 'very', 'both', 'over',\n"
+        "                'into', 'out', 'how', 'does', 'show', 'new', 'two',\n"
+        "                'complete', 'between', 'first', 'second', 'using',\n"
+        "            }\n"
+        "            _physics_terms = [t for t in formulation.search_terms if t not in _stopset]\n"
+        "            _terms_to_use = _physics_terms[:5] if _physics_terms else formulation.search_terms[:3]\n"
+        "            # OR lets any matching term return results; AND would require all to co-occur.\n"
+        "            terms_query = ' OR '.join(f'all:{term}' for term in _terms_to_use)\n"
+        "            query_parts.append(f'({terms_query})')\n"
+    )
+
+    if OLD not in src or NEW in src:
+        return 0
+
+    TARGET.write_text(src.replace(OLD, NEW), encoding='utf-8')
+    print(f"  FIXED [arxiv-query  ]  {TARGET}  ->  AND -> OR + filter generic English words")
+    return 1
+
+
+def phase27_fix_cosine_similarity_and_encoding(scan_files: list) -> int:
+    """
+    Fix 1: knowledge/embedder.py — cosine_similarity stub returns dict() instead of float.
+    The real sync implementation is compute_similarity(); make the async wrapper delegate to it.
+
+    Fix 2: main.py — print(result) crashes on Windows CP1252 consoles when the result
+    contains Greek/Unicode characters (e.g. φ from physics papers).
+    Replace with a UTF-8-safe print.
+    """
+    changed = 0
+
+    # ── Fix 1: cosine_similarity stub ──────────────────────────────────────
+    embedder_path = Path("knowledge/embedder.py")
+    if embedder_path.exists():
+        src = embedder_path.read_text(encoding="utf-8", errors="replace")
+        OLD_CS = (
+            "    async def cosine_similarity(self, *args, **kwargs):\n"
+            "        return dict()"
+        )
+        NEW_CS = (
+            "    async def cosine_similarity(self, embedding1, embedding2, *args, **kwargs) -> float:\n"
+            "        \"\"\"Async wrapper around compute_similarity.\"\"\"\n"
+            "        import numpy as np\n"
+            "        try:\n"
+            "            e1 = np.array(embedding1) if not isinstance(embedding1, np.ndarray) else embedding1\n"
+            "            e2 = np.array(embedding2) if not isinstance(embedding2, np.ndarray) else embedding2\n"
+            "            return float(self.compute_similarity(e1, e2))\n"
+            "        except Exception:\n"
+            "            return 0.0"
+        )
+        if OLD_CS in src:
+            src = src.replace(OLD_CS, NEW_CS, 1)
+            embedder_path.write_text(src, encoding="utf-8")
+            changed += 1
+            print("  [27] Fixed cosine_similarity stub → delegates to compute_similarity()")
+        elif NEW_CS in src:
+            print("  [27] cosine_similarity fix already applied — skip")
+        else:
+            print("  [27] WARNING: cosine_similarity stub not found in expected form")
+    else:
+        print("  [27] knowledge/embedder.py not found — skip")
+
+    # ── Fix 2: UTF-8-safe print in main.py ─────────────────────────────────
+    main_path = Path("main.py")
+    if main_path.exists():
+        src = main_path.read_text(encoding="utf-8", errors="replace")
+        OLD_PRINT = "    if result:\n        print(result)"
+        NEW_PRINT = (
+            "    if result:\n"
+            "        try:\n"
+            "            print(result)\n"
+            "        except UnicodeEncodeError:\n"
+            "            sys.stdout.buffer.write((str(result) + '\\n').encode('utf-8', errors='replace'))"
+        )
+        # Also ensure sys is imported
+        if OLD_PRINT in src:
+            src = src.replace(OLD_PRINT, NEW_PRINT, 1)
+            if "import sys" not in src:
+                src = "import sys\n" + src
+            main_path.write_text(src, encoding="utf-8")
+            changed += 1
+            print("  [27] Fixed main.py print() → UTF-8-safe fallback for Windows console")
+        elif NEW_PRINT in src:
+            print("  [27] UTF-8 print fix already applied — skip")
+        else:
+            print("  [27] WARNING: could not locate print(result) in main.py")
+    else:
+        print("  [27] main.py not found — skip")
+
+    return changed
+
+
+def phase26_fix_xml_element_truthiness(scan_files: list) -> int:
+    """
+    Fix: _parse_paper_entry silently returns None for every ArXiv entry.
+
+    Root cause: xml.etree.ElementTree Element objects with no child elements
+    (e.g. <id>text</id>) evaluate as FALSY in Python even when found and non-None.
+    So `if not all([id_elem, title_elem, summary_elem])` is always True, causing
+    every paper to be silently dropped.  Also guards against None .text attributes.
+
+    Fix: replace truthiness check with explicit `is None` checks, and add a warning
+    log so future regressions are immediately visible.
+    """
+    target = Path("agents/arxiv_search_agent.py")
+    if not target.exists():
+        print("  [26] agents/arxiv_search_agent.py not found — skip")
+        return 0
+
+    src = target.read_text(encoding="utf-8", errors="replace")
+    changed = 0
+
+    # ── Fix 1: truthiness → is-None check ──────────────────────────────────
+    OLD_CHECK = "            if not all([id_elem, title_elem, summary_elem]):\n                return None"
+    NEW_CHECK = (
+        "            if id_elem is None or title_elem is None or summary_elem is None:\n"
+        "                self.logger.warning(\n"
+        "                    f'[parse-paper] missing elem: id={id_elem is not None} '\n"
+        "                    f'title={title_elem is not None} summary={summary_elem is not None}'\n"
+        "                )\n"
+        "                return None"
+    )
+    if OLD_CHECK in src:
+        src = src.replace(OLD_CHECK, NEW_CHECK, 1)
+        changed += 1
+        print("  [26] Fixed Element truthiness check → is None check in _parse_paper_entry")
+    elif NEW_CHECK in src:
+        print("  [26] Element truthiness fix already applied — skip")
+    else:
+        print("  [26] WARNING: could not locate truthiness check — manual inspection needed")
+
+    # ── Fix 2: guard None .text on published/updated ────────────────────────
+    OLD_DATES = (
+        "            # Parse dates\n"
+        "            published = datetime.fromisoformat(published_elem.text.replace('Z', '+00:00'))\n"
+        "            updated = datetime.fromisoformat(updated_elem.text.replace('Z', '+00:00'))"
+    )
+    NEW_DATES = (
+        "            # Parse dates\n"
+        "            _pub_text = (published_elem.text or '') if published_elem is not None else ''\n"
+        "            _upd_text = (updated_elem.text or '') if updated_elem is not None else ''\n"
+        "            try:\n"
+        "                published = datetime.fromisoformat(_pub_text.replace('Z', '+00:00')) if _pub_text else datetime.now()\n"
+        "            except ValueError:\n"
+        "                published = datetime.now()\n"
+        "            try:\n"
+        "                updated = datetime.fromisoformat(_upd_text.replace('Z', '+00:00')) if _upd_text else datetime.now()\n"
+        "            except ValueError:\n"
+        "                updated = datetime.now()"
+    )
+    if OLD_DATES in src:
+        src = src.replace(OLD_DATES, NEW_DATES, 1)
+        changed += 1
+        print("  [26] Fixed None-safe date parsing in _parse_paper_entry")
+    elif NEW_DATES in src:
+        print("  [26] Date parsing fix already applied — skip")
+    else:
+        print("  [26] WARNING: could not locate date parsing block — skipping date fix")
+
+    if changed:
+        target.write_text(src, encoding="utf-8")
+
+    return changed
 
 
 if __name__ == "__main__":

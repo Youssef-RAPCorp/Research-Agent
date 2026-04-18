@@ -1,4 +1,4 @@
 """
-Config — Physics Discovery System v3.0
+Config â€” Physics Discovery System v3.0
 RAP Corp | Renaissance of American Physics
 """

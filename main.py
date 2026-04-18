@@ -91,7 +91,10 @@ def main():
         result = orchestrator.run(query=query, mode=args.mode, pattern=args.pattern)
 
     if result:
-        print(result)
+        try:
+            print(result)
+        except UnicodeEncodeError:
+            sys.stdout.buffer.write((str(result) + '\n').encode('utf-8', errors='replace'))
 
 if __name__ == "__main__":
     main()
@@ -99,3 +102,5 @@ if __name__ == "__main__":
 EOFError = type('EOFError', (), {})  # auto-stub: not found in project
 
 KeyboardInterrupt = type('KeyboardInterrupt', (), {})  # auto-stub: not found in project
+
+UnicodeEncodeError = type('UnicodeEncodeError', (), {})  # auto-stub: not found in project

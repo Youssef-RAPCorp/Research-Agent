@@ -1,0 +1,38 @@
+# Physics Discovery System v3.0 — Dependencies
+# Install with: pip install -r requirements.txt
+
+# ── Core AI ──────────────────────────────────────────────────
+anthropic>=0.40.0
+google-generativeai>=0.8.0
+
+# ── Vector DB ────────────────────────────────────────────────
+qdrant-client>=1.9.0
+sentence-transformers>=3.0.0
+
+# ── Symbolic Math ─────────────────────────────────────────────
+sympy>=1.13.0
+scipy>=1.13.0
+numpy>=2.0.0
+
+# ── Physics / Science ─────────────────────────────────────────
+arxiv>=2.1.0
+pdfplumber>=0.11.0
+
+# ── Web / API ─────────────────────────────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+httpx>=0.27.0
+
+# ── Firebase ─────────────────────────────────────────────────
+firebase-admin>=6.5.0
+
+# ── Scheduling ────────────────────────────────────────────────
+apscheduler>=3.10.0
+
+# ── Utilities ─────────────────────────────────────────────────
+pydantic>=2.8.0
+pydantic-settings>=2.4.0
+python-dotenv>=1.0.0
+tenacity>=9.0.0
+rich>=13.7.0
+aiofiles>=24.1.0

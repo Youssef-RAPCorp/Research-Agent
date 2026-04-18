@@ -1,4 +1,4 @@
 """
-Thinking — Physics Discovery System v3.0
+Thinking â€” Physics Discovery System v3.0
 RAP Corp | Renaissance of American Physics
 """

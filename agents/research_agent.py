@@ -104,6 +104,10 @@ class ResearchAgent(BaseAgent):
         for _i, _sr in enumerate(search_results):
             _np = len(_sr.get("papers", [])) if isinstance(_sr, dict) else "ERR"
             logger.info(f"[gather #{_i}] type={type(_sr).__name__} papers={_np} keys={list(_sr.keys()) if isinstance(_sr, dict) else _sr}")
+        for _i, _sr in enumerate(search_results):
+            _np = len(_sr.get("papers", [])) if isinstance(_sr, dict) else "ERR"
+            _qu = _sr.get("query_used", "") if isinstance(_sr, dict) else ""
+            logger.info(f"[gather #{_i}] type={type(_sr).__name__} papers={_np} query_used={_qu!r} keys={list(_sr.keys()) if isinstance(_sr, dict) else _sr}")
         
         # Synthesize knowledge
         synthesis_result = await self.synthesis_agent.process_message({

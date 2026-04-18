@@ -1,0 +1,176 @@
+version: '3.8'
+
+services:
+  physics-discovery-app:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - FIREBASE_EMULATOR_HOST=firebase-emulator:9099
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://physics:discovery@postgres:5432/physics_db
+      - PYTHONPATH=/app
+      - ENVIRONMENT=production
+    depends_on:
+      - qdrant
+      - firebase-emulator
+      - redis
+      - postgres
+      - scheduler-worker
+    volumes:
+      - ../data:/app/data
+      - ../logs:/app/logs
+    restart: unless-stopped
+    networks:
+      - physics-network
+
+  qdrant:
+    image: qdrant/qdrant:v1.7.4
+    ports:
+      - "6333:6333"
+    environment:
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__STORAGE__SNAPSHOTS_PATH=/qdrant/snapshots
+      - QDRANT__STORAGE__COLLECTIONS_PATH=/qdrant/collections
+    volumes:
+      - qdrant_storage:/qdrant/storage
+      - qdrant_snapshots:/qdrant/snapshots
+    restart: unless-stopped
+    networks:
+      - physics-network
+
+  firebase-emulator:
+    image: firebase/emulator-suite
+    ports:
+      - "9099:9099"
+      - "4000:4000"
+      - "5001:5001"
+      - "8080:8080"
+      - "9000:9000"
+    environment:
+      - FIREBASE_PROJECT=physics-discovery-demo
+      - FIREBASE_TOKEN=demo-token
+    command: >
+      sh -c "firebase emulators:start --only auth,firestore,functions,hosting,storage
+      --project=physics-discovery-demo
+      --host=0.0.0.0"
+    volumes:
+      - ../firebase:/firebase
+    restart: unless-stopped
+    networks:
+      - physics-network
+
+  scheduler-worker:
+    build:
+      context: ../
+      dockerfile: Dockerfile.scheduler
+    environment:
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://physics:discovery@postgres:5432/physics_db
+      - PYTHONPATH=/app
+      - WORKER_TYPE=scheduler
+    depends_on:
+      - qdrant
+      - redis
+      - postgres
+    volumes:
+      - ../data:/app/data
+      - ../logs:/app/logs
+    restart: unless-stopped
+    networks:
+      - physics-network
+
+  redis:
+    image: redis:7.2-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - physics-network
+
+  postgres:
+    image: postgres:15.5-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=physics_db
+      - POSTGRES_USER=physics
+      - POSTGRES_PASSWORD=discovery
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../database/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+    restart: unless-stopped
+    networks:
+      - physics-network
+
+  nginx:
+    image: nginx:1.25-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ../nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ../nginx/ssl:/etc/nginx/ssl
+    depends_on:
+      - physics-discovery-app
+    restart: unless-stopped
+    networks:
+      - physics-network
+
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    networks:
+      - physics-network
+
+  grafana:
+    image: grafana/grafana:10.2.2
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=physics2024
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ../monitoring/grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - physics-network
+
+volumes:
+  qdrant_storage:
+  qdrant_snapshots:
+  redis_data:
+  postgres_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  physics-network:
+    driver: bridge
