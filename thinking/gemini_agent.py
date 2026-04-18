@@ -35,7 +35,7 @@ class GeminiAgent:
     def __init__(
         self,
         api_key: str,
-        model: str = "gemini-2.0-flash",
+        model: str = "gemini-flash-latest",
         temperature: float = 0.2,
         max_tokens: int = 8192,
     ):
