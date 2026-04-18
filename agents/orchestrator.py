@@ -79,12 +79,20 @@ class PhysicsOrchestrator:
         # ── Phase 2: Thinking ─────────────────────────────────────────────
         gemini = self._build_gemini()
         if gemini is None or not gemini.available:
-            # No API key — return raw research summary
             logger.warning("Gemini unavailable — returning raw research results")
             return f"## Research Results\n\n{papers_text}"
 
         answer = await self._thinking_phase(query, papers_text, pattern, gemini)
-        return answer
+
+        # ── Combine: paper list + reasoning ──────────────────────────────
+        divider = "\n\n" + "═" * 60 + "\n"
+        return (
+            f"## Retrieved Evidence\n\n"
+            f"{papers_text}"
+            f"{divider}"
+            f"## Analysis  (pattern: {pattern})\n\n"
+            f"{answer}"
+        )
 
     # ── Research phase ────────────────────────────────────────────────────
 
@@ -519,14 +527,30 @@ class PhysicsOrchestrator:
     def _build_reasoning_prompt(self, query: str, papers_text: str) -> str:
         return (
             f"Physics research question: {query}\n\n"
-            f"The following papers and evidence have been retrieved:\n\n"
+            f"══════════════════════════════════════════\n"
+            f"RETRIEVED RESEARCH EVIDENCE\n"
+            f"══════════════════════════════════════════\n"
             f"{papers_text}\n\n"
-            f"Using this evidence, provide a rigorous physics analysis. "
-            f"Identify what the papers collectively imply, what remains uncertain, "
-            f"what the current theoretical understanding is, and whether Maxwell's "
-            f"equations (or whatever theory the question concerns) are complete, "
-            f"incomplete, or require extension at high energies or other regimes. "
-            f"Cite specific papers or findings where possible."
+            f"══════════════════════════════════════════\n"
+            f"INSTRUCTIONS\n"
+            f"══════════════════════════════════════════\n"
+            f"Write a thorough, well-structured physics analysis that answers the "
+            f"question above. Your response must:\n\n"
+            f"1. CITE EVIDENCE EXPLICITLY — for every claim, name the specific paper "
+            f"title or authors from the evidence above. Do not make uncited assertions.\n\n"
+            f"2. COVER ALL RELEVANT PAPERS — go through the retrieved evidence "
+            f"systematically. Do not silently ignore papers; if a paper is tangential, "
+            f"say so and explain why.\n\n"
+            f"3. REASON IN DEPTH — explain the physics mechanisms involved "
+            f"(relevant equations, energy scales, symmetries, theoretical frameworks). "
+            f"Do not summarise superficially.\n\n"
+            f"4. ADDRESS OPEN QUESTIONS — identify what the evidence leaves unresolved, "
+            f"what experiments would settle them, and what the most promising "
+            f"theoretical directions are.\n\n"
+            f"5. STATE A CONCLUSION — end with a clear, direct answer to the question "
+            f"based on the weight of the evidence.\n\n"
+            f"Your response should be comprehensive — do not truncate or abbreviate. "
+            f"A thorough analysis is expected."
         )
 
     async def _direct_gemini(

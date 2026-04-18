@@ -37,7 +37,7 @@ class GeminiAgent:
         api_key: str,
         model: str = "gemini-flash-latest",
         temperature: float = 0.2,
-        max_tokens: int = 8192,
+        max_tokens: int = 32768,
     ):
         try:
             import google.generativeai as genai
