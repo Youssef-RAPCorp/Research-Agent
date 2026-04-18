@@ -2191,6 +2191,10 @@ def run():
     print("  " + "─" * 52)
     total_fixed += phase17_fix_qdrant_vector_dim(scan_files)
 
+    print("\n  Phase 20: Fix paper extraction — unwrap nested ArXiv 'result' key")
+    print("  " + "─" * 52)
+    total_fixed += phase20_fix_paper_extraction(scan_files)
+
     print("\n  Phase 18: Format orchestrator output (extract content from research dict)")
     print("  " + "─" * 52)
     total_fixed += phase18_fix_orchestrator_output(scan_files)
@@ -2442,6 +2446,88 @@ def phase18_fix_orchestrator_output(scan_files: list) -> int:
         if changed:
             py_file.write_text(src, encoding='utf-8')
             fixed += 1
+    return fixed
+
+
+# ── Phase 20: Fix paper extraction — unwrap nested "result" key ───────────────
+
+def phase20_fix_paper_extraction(scan_files: list) -> int:
+    """
+    ArXivSearchAgent.process_message returns:
+        {"status": "success", "result": {"papers": [...], ...}}
+
+    But research_agent and synthesis_agent look for "papers" at the top level,
+    or search keys ("papers","results","articles",...) — never "result" (singular).
+    So ArXiv papers are silently dropped and synthesis sees no evidence.
+
+    Fix: in both files, add "result" to the key search list, and when a value
+    is a dict (the nested SearchResult), also check its "papers" key.
+    """
+    fixed = 0
+
+    # ── research_agent: _combined_papers extraction ───────────────────────────
+    RA = Path('agents/research_agent.py')
+    if RA.exists():
+        try:
+            src = RA.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            src = None
+        if src:
+            OLD_RA = '            for _lk in ("papers","results","articles","items","entries","data"):'
+            NEW_RA = '            for _lk in ("papers","result","results","articles","items","entries","data"):'
+            if OLD_RA in src and NEW_RA not in src:
+                # Also handle the case where _plist is a dict (nested SearchResult)
+                OLD_RA2 = (
+                    '                if isinstance(_plist, list):\n'
+                    '                    for _p in _plist:\n'
+                )
+                NEW_RA2 = (
+                    '                if isinstance(_plist, dict):\n'
+                    '                    _plist = _plist.get("papers", [])\n'
+                    '                if isinstance(_plist, list):\n'
+                    '                    for _p in _plist:\n'
+                )
+                src = src.replace(OLD_RA, NEW_RA)
+                if OLD_RA2 in src and NEW_RA2 not in src:
+                    src = src.replace(OLD_RA2, NEW_RA2)
+                RA.write_text(src, encoding='utf-8')
+                print(f"  FIXED [paper-extract]  {RA}  ->  added 'result' key + dict unwrap")
+                fixed += 1
+
+    # ── synthesis_agent: process_request paper extraction ────────────────────
+    SA = Path('agents/synthesis_agent.py')
+    if SA.exists():
+        try:
+            src = SA.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            src = None
+        if src:
+            OLD_SA = (
+                '                for _p in _r.get("papers", []):\n'
+                '                        if isinstance(_p, dict):\n'
+                '                            _t = _p.get("title", "")\n'
+                '                            _a = _p.get("abstract", _p.get("summary", ""))\n'
+                '                            if _a:\n'
+                '                                _parts.append("Title: " + _t + "\\nAbstract: " + _a)\n'
+                '                    _c = _r.get("content", _r.get("text", ""))\n'
+            )
+            NEW_SA = (
+                '                    _nested = _r.get("result", _r)\n'
+                '                    _nested = _nested if isinstance(_nested, dict) else _r\n'
+                '                    for _p in _nested.get("papers", _r.get("papers", [])):\n'
+                '                        if isinstance(_p, dict):\n'
+                '                            _t = _p.get("title", "")\n'
+                '                            _a = _p.get("abstract", _p.get("summary", ""))\n'
+                '                            if _a:\n'
+                '                                _parts.append("Title: " + _t + "\\nAbstract: " + _a)\n'
+                '                    _c = _r.get("content", _r.get("text", ""))\n'
+            )
+            if OLD_SA in src and NEW_SA not in src:
+                src = src.replace(OLD_SA, NEW_SA)
+                SA.write_text(src, encoding='utf-8')
+                print(f"  FIXED [paper-extract]  {SA}  ->  unwrap nested 'result' before paper extraction")
+                fixed += 1
+
     return fixed
 
 
