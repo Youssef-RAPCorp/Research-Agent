@@ -209,32 +209,57 @@ class PhysicsOrchestrator:
         self, query: str, papers_text: str, gemini
     ) -> str:
         """
-        Debate Only When Necessary:
+        Debate Only When Necessary — structured four-criteria confidence check:
         1. Generate an initial answer
-        2. Score confidence on physics criteria
-        3. If confidence < threshold → run self_refine to improve
+        2. Score on inter_paper_coherence (weighted x2), factual_accuracy,
+           framework_consistency, evidence_support
+        3. If weighted score < 7.0 → run self_refine
         4. Return best answer
         """
+        import json as _json
+        import re as _re
         logger.info("Pattern: down_adaptive")
 
         initial = await self._direct_gemini(query, papers_text, gemini)
 
-        # Quick self-assessment
         confidence_prompt = (
-            f"Rate your confidence in this physics answer on a scale of 0-10.\n"
-            f"Consider: factual accuracy, completeness, reasoning rigour.\n"
-            f"Respond with ONLY a number.\n\n"
-            f"Answer:\n{initial}"
+            f"Rate this physics analysis on four criteria. "
+            f"Respond with JSON only — no other text.\n\n"
+            f"Analysis:\n{initial}\n\n"
+            f"Criteria (score each 0-10):\n"
+            f"1. inter_paper_coherence: Do the cited papers form a logically connected "
+            f"argument with explicit inferential steps? Are papers from incompatible "
+            f"frameworks (classical GR vs. metric-affine vs. scalar-tensor) mixed without "
+            f"justification?\n"
+            f"2. factual_accuracy: Are individual claims about each paper correct and "
+            f"supported by the paper's content?\n"
+            f"3. framework_consistency: Does the analysis stay within a consistent "
+            f"theoretical framework, or conflate distinct models without explanation?\n"
+            f"4. evidence_support: Do the conclusions follow from the weight of the cited "
+            f"evidence?\n\n"
+            f'{{"inter_paper_coherence": N, "factual_accuracy": N, '
+            f'"framework_consistency": N, "evidence_support": N}}'
         )
-        score_str = await gemini.generate(confidence_prompt)
+        score_text = await gemini.generate(confidence_prompt)
         try:
-            score = float(score_str.strip().split()[0])
+            json_match = _re.search(r'\{[^{}]*\}', score_text, _re.DOTALL)
+            if json_match:
+                scores = _json.loads(json_match.group())
+                # inter_paper_coherence weighted double — the specific failure mode we guard
+                weighted = (
+                    scores.get("inter_paper_coherence", 5) * 2
+                    + scores.get("factual_accuracy", 5)
+                    + scores.get("framework_consistency", 5)
+                    + scores.get("evidence_support", 5)
+                ) / 5.0
+            else:
+                weighted = 5.0
         except Exception:
-            score = 5.0
+            weighted = 5.0
 
-        logger.info(f"DOWN adaptive — initial confidence score: {score:.1f}/10")
+        logger.info(f"DOWN adaptive — structured confidence: {weighted:.1f}/10")
 
-        if score < 7.0:
+        if weighted < 7.0:
             logger.info("Confidence below threshold — running self_refine")
             return await self._pattern_self_refine(query, papers_text, gemini)
 
@@ -270,31 +295,40 @@ class PhysicsOrchestrator:
         self, query: str, papers_text: str, gemini
     ) -> str:
         """
-        Generate an answer, reflect on its quality, then produce
-        an improved version that addresses the reflection.
+        Generate an answer, run structured multi-criteria reflection via
+        ReflectionPattern (including inter-paper coherence), then produce
+        an improved version targeting the lowest-scoring criteria.
         """
+        import uuid as _uuid
+        from thinking.reflection import ReflectionPattern
         logger.info("Pattern: reflection")
-        prompt = self._build_reasoning_prompt(query, papers_text)
 
+        prompt = self._build_reasoning_prompt(query, papers_text)
         initial = await gemini.generate(prompt)
 
-        reflect_prompt = (
-            f"Reflect critically on this physics analysis. Identify:\n"
-            f"1. Any factual errors or unsupported claims\n"
-            f"2. Important aspects of the question that weren't addressed\n"
-            f"3. Logical gaps in the reasoning\n"
-            f"4. Whether conclusions actually follow from the cited evidence\n\n"
-            f"Original question: {query}\n\n"
-            f"Analysis to reflect on:\n{initial}"
+        pattern = ReflectionPattern(agent=gemini)
+        reflection_result = await pattern.reflect(initial, str(_uuid.uuid4()))
+
+        low_criteria = [
+            f"- {s.criteria.value} (score {s.score:.2f}): {s.reasoning}"
+            for s in reflection_result.transparency_scores
+            if s.score < 0.7
+        ]
+        critique_summary = (
+            "\n".join(low_criteria)
+            if low_criteria
+            else "All criteria passed threshold — minor refinements only."
         )
-        reflection = await gemini.generate(reflect_prompt)
 
         improve_prompt = (
-            f"Using this reflection, produce a final, improved analysis.\n\n"
+            f"Using this structured critique, produce a final improved analysis.\n\n"
             f"Original question: {query}\n\n"
             f"Research context:\n{papers_text}\n\n"
             f"Previous analysis:\n{initial}\n\n"
-            f"Reflection / critique:\n{reflection}\n\n"
+            f"Structured critique (criteria scoring below 0.7):\n{critique_summary}\n\n"
+            f"Pay special attention to inter-paper coherence: rebuild the argument as "
+            f"an explicit logical chain, stating the inferential step each paper "
+            f"contributes, and exclude any paper that does not advance the argument.\n\n"
             f"Write the final improved answer now:"
         )
         return await gemini.generate(improve_prompt)
@@ -538,9 +572,11 @@ class PhysicsOrchestrator:
             f"question above. Your response must:\n\n"
             f"1. CITE EVIDENCE EXPLICITLY — for every claim, name the specific paper "
             f"title or authors from the evidence above. Do not make uncited assertions.\n\n"
-            f"2. COVER ALL RELEVANT PAPERS — go through the retrieved evidence "
-            f"systematically. Do not silently ignore papers; if a paper is tangential, "
-            f"say so and explain why.\n\n"
+            f"2. BUILD A LOGICAL CHAIN — only cite papers that contribute a specific "
+            f"inferential step to your argument. For each cited paper, state explicitly "
+            f"what claim it supports and how it connects to the next step. If a retrieved "
+            f"paper belongs to an incompatible theoretical framework or does not advance "
+            f"the central argument, exclude it and note briefly why.\n\n"
             f"3. REASON IN DEPTH — explain the physics mechanisms involved "
             f"(relevant equations, energy scales, symmetries, theoretical frameworks). "
             f"Do not summarise superficially.\n\n"

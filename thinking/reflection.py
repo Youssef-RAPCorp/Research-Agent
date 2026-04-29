@@ -30,6 +30,7 @@ class ReflectionCriteria(Enum):
     RIGOR = "rigor"
     RELEVANCE = "relevance"
     FEASIBILITY = "feasibility"
+    COHERENCE = "coherence"
 
 
 @dataclass
@@ -71,14 +72,15 @@ class ReflectionResult:
         
         # Weight criteria by importance
         weights = {
-            ReflectionCriteria.ACCURACY: 0.25,
-            ReflectionCriteria.RIGOR: 0.20,
-            ReflectionCriteria.COMPLETENESS: 0.15,
-            ReflectionCriteria.CONSISTENCY: 0.15,
-            ReflectionCriteria.CLARITY: 0.10,
-            ReflectionCriteria.RELEVANCE: 0.10,
-            ReflectionCriteria.NOVELTY: 0.03,
-            ReflectionCriteria.FEASIBILITY: 0.02
+            ReflectionCriteria.ACCURACY: 0.20,
+            ReflectionCriteria.COHERENCE: 0.20,
+            ReflectionCriteria.RIGOR: 0.18,
+            ReflectionCriteria.COMPLETENESS: 0.12,
+            ReflectionCriteria.CONSISTENCY: 0.12,
+            ReflectionCriteria.CLARITY: 0.08,
+            ReflectionCriteria.RELEVANCE: 0.08,
+            ReflectionCriteria.NOVELTY: 0.01,
+            ReflectionCriteria.FEASIBILITY: 0.01,
         }
         
         weighted_sum = 0.0
@@ -169,11 +171,12 @@ class ImprovementTracker:
 class ReflectionPattern:
     """Structured quality rubric critique with transparency scores and improvement tracking."""
     
-    def __init__(self,      memory: Optional[PersistentMemory] = None, **kwargs):
+    def __init__(self, memory: Optional[PersistentMemory] = None, agent=None, **kwargs):
         self.memory = memory or PersistentMemory()
+        self.agent = agent
         self.improvement_trackers: Dict[str, ImprovementTracker] = {}
-        self.critique_model = "claude-3-5-sonnet"  # Different model for critique
-        self.generation_model = "gpt-4o"  # Model that generated original content
+        self.critique_model = "claude-3-5-sonnet"
+        self.generation_model = "gpt-4o"
         
     async def reflect(self, 
                      content: str, 
@@ -260,66 +263,96 @@ class ReflectionPattern:
         
         return scores
     
-    async def _score_criteria(self, 
-                             content: str, 
-                             criteria: ReflectionCriteria, 
+    async def _score_criteria(self,
+                             content: str,
+                             criteria: ReflectionCriteria,
                              model: str) -> Dict[str, Any]:
-        """Score content against a specific criteria."""
-        # Create assessment prompt based on criteria
+        """Score content against a specific criteria using LLM critique."""
+        import re as _re
         criteria_prompts = {
-            ReflectionCriteria.ACCURACY: "Evaluate the factual accuracy and correctness of claims",
-            ReflectionCriteria.COMPLETENESS: "Assess how thoroughly the topic is covered",
-            ReflectionCriteria.CLARITY: "Evaluate how clearly and understandably the content is expressed",
-            ReflectionCriteria.CONSISTENCY: "Check for internal logical consistency and coherence",
-            ReflectionCriteria.NOVELTY: "Assess the originality and innovative aspects",
-            ReflectionCriteria.RIGOR: "Evaluate the methodological rigor and analytical depth",
-            ReflectionCriteria.RELEVANCE: "Assess relevance to the intended purpose or domain",
-            ReflectionCriteria.FEASIBILITY: "Evaluate practical implementability and realism"
+            ReflectionCriteria.ACCURACY: (
+                "Evaluate the factual accuracy of every claim. "
+                "Flag any assertion not directly supported by the cited evidence."
+            ),
+            ReflectionCriteria.COMPLETENESS: (
+                "Assess how thoroughly the question is answered given the available evidence."
+            ),
+            ReflectionCriteria.CLARITY: (
+                "Evaluate how clearly and logically the argument is expressed."
+            ),
+            ReflectionCriteria.CONSISTENCY: (
+                "Check for internal logical consistency. "
+                "Identify contradictions or unsupported inferential leaps."
+            ),
+            ReflectionCriteria.NOVELTY: (
+                "Assess the originality and depth of insight beyond simple summarisation."
+            ),
+            ReflectionCriteria.RIGOR: (
+                "Evaluate methodological rigor: are equations used correctly, "
+                "are approximations justified, are confidence levels stated?"
+            ),
+            ReflectionCriteria.RELEVANCE: (
+                "Assess whether every cited paper is genuinely relevant to the central argument."
+            ),
+            ReflectionCriteria.FEASIBILITY: (
+                "Evaluate whether the conclusions are experimentally or theoretically testable."
+            ),
+            ReflectionCriteria.COHERENCE: (
+                "Evaluate whether the cited papers form a logically connected chain of reasoning. "
+                "Are the inferential steps between papers explicit? "
+                "Are papers from incompatible theoretical frameworks (e.g. classical GR, "
+                "metric-affine gravity, scalar-tensor theories) mixed without justification? "
+                "Does the synthesis build a unified argument or merely concatenate summaries?"
+            ),
         }
-        
-        prompt = f"""
-        As an expert critic, {criteria_prompts[criteria]} in the following content:
 
-        {content}
+        prompt = (
+            f"As an expert physics critic, {criteria_prompts[criteria]}\n\n"
+            f"Content to evaluate:\n{content}\n\n"
+            f"Respond in JSON format only — no preamble:\n"
+            f'{{"score": <float 0.0-1.0>, '
+            f'"reasoning": "<detailed explanation>", '
+            f'"confidence": <float 0.0-1.0>}}'
+        )
 
-        Provide a structured assessment with:
-        1. Score (0.0-1.0): Numerical rating
-        2. Reasoning: Detailed explanation of the score
-        3. Confidence (0.0-1.0): How confident you are in this assessment
+        if self.agent is not None:
+            try:
+                response = await self.agent.process_message(prompt)
+                critique_text = (
+                    response.get("content", "") if isinstance(response, dict) else str(response)
+                )
+                json_match = _re.search(r'\{[^{}]*\}', critique_text, _re.DOTALL)
+                if json_match:
+                    data = json.loads(json_match.group())
+                    return {
+                        "score": max(0.0, min(1.0, float(data.get("score", 0.5)))),
+                        "reasoning": str(data.get("reasoning", "")),
+                        "confidence": max(0.0, min(1.0, float(data.get("confidence", 0.7)))),
+                    }
+            except Exception as e:
+                logger.warning(f"LLM critique failed for {criteria.value}: {e}")
 
-        Respond in JSON format:
-        {{
-            "score": 0.0-1.0,
-            "reasoning": "detailed explanation",
-            "confidence": 0.0-1.0
-        }}
-        """
-        
-        # TODO: Integrate with actual LLM API for critique model
-        # For now, simulate scoring based on content analysis
-        await asyncio.sleep(0.1)  # Simulate API call
-        
-        # Simple heuristic scoring (replace with actual LLM call)
-        base_score = min(len(content) / 1000, 0.8)  # Length-based baseline
-        confidence = 0.7
-        
+        # Fallback heuristic — only reached when agent is unavailable or call fails
+        base_score = min(len(content) / 1000, 0.8)
         criteria_adjustments = {
             ReflectionCriteria.ACCURACY: 0.1 if "physics" in content.lower() else -0.1,
             ReflectionCriteria.COMPLETENESS: 0.1 if len(content) > 500 else -0.2,
             ReflectionCriteria.CLARITY: 0.1 if len(content.split()) < 200 else -0.1,
-            ReflectionCriteria.CONSISTENCY: 0.0,  # Neutral
+            ReflectionCriteria.CONSISTENCY: 0.0,
             ReflectionCriteria.NOVELTY: 0.05 if "new" in content.lower() else -0.05,
             ReflectionCriteria.RIGOR: 0.1 if "equation" in content.lower() else -0.1,
-            ReflectionCriteria.RELEVANCE: 0.05,  # Slight positive bias
-            ReflectionCriteria.FEASIBILITY: -0.05  # Slight skepticism
+            ReflectionCriteria.RELEVANCE: 0.05,
+            ReflectionCriteria.FEASIBILITY: -0.05,
+            ReflectionCriteria.COHERENCE: -0.15,
         }
-        
         adjusted_score = max(0.0, min(1.0, base_score + criteria_adjustments.get(criteria, 0.0)))
-        
         return {
             "score": adjusted_score,
-            "reasoning": f"Assessment based on {criteria.value} criteria: content demonstrates {adjusted_score:.1f} quality level",
-            "confidence": confidence
+            "reasoning": (
+                f"Heuristic fallback (agent unavailable): "
+                f"{criteria.value} scored {adjusted_score:.2f}"
+            ),
+            "confidence": 0.3,
         }
     
     def _calculate_overall_quality(self, transparency_scores: List[TransparencyScore]) -> float:
@@ -372,7 +405,12 @@ class ReflectionPattern:
             ReflectionCriteria.NOVELTY: "Highlight unique insights and original contributions",
             ReflectionCriteria.RIGOR: "Strengthen analytical depth and methodological approach",
             ReflectionCriteria.RELEVANCE: "Better align content with intended purpose and audience",
-            ReflectionCriteria.FEASIBILITY: "Address practical implementation challenges"
+            ReflectionCriteria.FEASIBILITY: "Address practical implementation challenges",
+            ReflectionCriteria.COHERENCE: (
+                "Rebuild the argument as an explicit logical chain: state the inferential step "
+                "each paper contributes, and remove papers from incompatible theoretical "
+                "frameworks that are included without justification"
+            ),
         }
         
         base_suggestion = criteria_suggestions.get(score.criteria)

@@ -65,10 +65,18 @@ class SelfRefiner:
         # Default rubric for physics research
         self.rubric = rubric or [
             RubricCriterion("accuracy", "Mathematical and scientific accuracy", 2.0),
+            RubricCriterion(
+                "coherence",
+                "Logical dependency chain between cited papers — do they form a connected "
+                "argument with explicit inferential steps, or are incompatible theoretical "
+                "frameworks (classical GR, metric-affine, scalar-tensor, etc.) mixed without "
+                "justification?",
+                2.0,
+            ),
             RubricCriterion("clarity", "Clear and understandable presentation", 1.5),
             RubricCriterion("completeness", "Comprehensive coverage of topic", 1.5),
             RubricCriterion("rigor", "Scientific rigor and methodology", 2.0),
-            RubricCriterion("novelty", "Original insights or approaches", 1.0)
+            RubricCriterion("novelty", "Original insights or approaches", 1.0),
         ]
         
         self.iterations: List[RefineIteration] = []
