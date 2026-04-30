@@ -1038,10 +1038,10 @@ class PhysicsOrchestrator:
         divider = "\\n\\n" + "═" * 60 + "\\n"
         return (
             f"## Retrieved Evidence\\n\\n"
-            f"{papers_text}"
+            f"{self._clean_output(papers_text)}"
             f"{divider}"
-            f"## Analysis  (pattern: {pattern})\\n\\n"
-            f"{answer}"
+            f"## Analysis\\n\\n"
+            f"{self._clean_output(answer)}"
         )
 
     # ── Research phase ────────────────────────────────────────────────────
@@ -1526,18 +1526,56 @@ class PhysicsOrchestrator:
             f"inferential step to your argument. For each cited paper, state explicitly "
             f"what claim it supports and how it connects to the next step. If a retrieved "
             f"paper belongs to an incompatible theoretical framework or does not advance "
-            f"the central argument, exclude it and note briefly why.\\n\\n"
-            f"3. REASON IN DEPTH — explain the physics mechanisms involved "
+            f"the central argument, exclude it silently — do not list, mention, or "
+            f"reference excluded papers anywhere in your response.\\n\\n"
+            f"3. MAINSTREAM VS. FRINGE — before citing any paper, classify its central "
+            f"claim as either mainstream consensus (widely accepted, peer-reviewed, "
+            f"consistent with SR/GR/QFT) or a minority/fringe position (contested, "
+            f"contradicts established physics, not in standard textbooks). Minority "
+            f"positions must be explicitly labelled as such and must not be treated on "
+            f"equal footing with mainstream results. If a fringe claim would undermine "
+            f"the logical coherence of the argument, exclude it silently.\\n\\n"
+            f"4. ADDRESS THEORETICAL INCOMPATIBILITIES — when the evidence draws on "
+            f"multiple theoretical frameworks (e.g. f(R) gravity, Lovelock gravity, "
+            f"Yang-Mills, scalar-tensor theories), explicitly state whether each pair "
+            f"is mathematically compatible, a complementary approximation in different "
+            f"regimes, or a mutually exclusive alternative. Do not present them as an "
+            f"interchangeable menu of options.\\n\\n"
+            f"5. REASON IN DEPTH — explain the physics mechanisms involved "
             f"(relevant equations, energy scales, symmetries, theoretical frameworks). "
             f"Do not summarise superficially.\\n\\n"
-            f"4. ADDRESS OPEN QUESTIONS — identify what the evidence leaves unresolved, "
-            f"what experiments would settle them, and what the most promising "
-            f"theoretical directions are.\\n\\n"
-            f"5. STATE A CONCLUSION — end with a clear, direct answer to the question "
-            f"based on the weight of the evidence.\\n\\n"
+            f"6. QUANTIFY EXPERIMENTAL REACH — for any predicted observable effect, "
+            f"include a quantitative estimate of the energy scale, detector precision, "
+            f"or instrumental sensitivity required to test it. State explicitly how "
+            f"far this is from current experimental capability (e.g. LHC reach, LIGO "
+            f"sensitivity, current CMB resolution).\\n\\n"
+            f"7. ADDRESS OPEN QUESTIONS — identify what the evidence leaves unresolved "
+            f"and what specific experiment or derivation would most advance the field.\\n\\n"
+            f"8. STATE A CONCLUSION — write a synthesis that goes beyond summarising "
+            f"the points above. It must identify: (a) what the weight of mainstream "
+            f"evidence actually establishes vs. what remains speculative, (b) which "
+            f"theoretical incompatibilities must be resolved for a unified framework, "
+            f"and (c) what the single most tractable next step is.\\n\\n"
             f"Your response should be comprehensive — do not truncate or abbreviate. "
             f"A thorough analysis is expected."
         )
+
+    def _clean_output(self, text: str) -> str:
+        """Strip machine-generated artifacts from output text."""
+        import re
+        # Remove local file paths (file:///... and Windows paths)
+        text = re.sub(r'file:///[^\\s\\)\\]]+', '', text)
+        text = re.sub(r'[A-Za-z]:\\\\(?:[^\\s\\)\\]]+)', '', text)
+        # Remove page count artifacts (e.g. "73/73", "Page 12 of 73")
+        text = re.sub(r'\\bPage\\s+\\d+\\s+of\\s+\\d+\\b', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'\\b\\d+/\\d+\\b(?=\\s*$)', '', text, flags=re.MULTILINE)
+        # Remove viewer/tool labels
+        text = re.sub(
+            r'\\b(Research JSON Viewer|Analysis \\(pattern:[^)]+\\))\\b', '', text
+        )
+        # Collapse multiple blank lines left by removals
+        text = re.sub(r'\\n{3,}', '\\n\\n', text)
+        return text.strip()
 
     async def _direct_gemini(
         self, query: str, papers_text: str, gemini
