@@ -1,0 +1,36 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*service-account*.json
+firebase-credentials*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Testing / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Logs and local data
+*.log
+logs/
+qdrant_storage/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
