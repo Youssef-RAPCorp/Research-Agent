@@ -174,4 +174,10 @@ python -m pytest tests/ -v
 ---
 
 *Built for RAP Corp — Renaissance of American Physics and Astronomy*
-"# Research-Agent" 
+
+---
+
+## License
+
+Released under the [MIT License](LICENSE). All direct dependencies in
+`requirements.txt` use permissive licenses (MIT, BSD, or Apache-2.0); none are copyleft.
